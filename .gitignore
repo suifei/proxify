@@ -1,0 +1,38 @@
+# ── Compiled binaries ────────────────────────────────────────────
+proxify
+proxify.exe
+
+# GCC / Clang intermediate files
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# MSVC intermediate files
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# MinGW / TCC
+*.map
+
+# ── Editor / IDE ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln.docstates
+*.ncb
+*.aps
+
+# ── OS artefacts ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Misc ──────────────────────────────────────────────────────────
+*.log
+*.tmp
+*~
