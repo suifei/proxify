@@ -151,6 +151,35 @@ On **Unix/macOS** `execvp` replaces the `proxify` process entirely — no wrappe
 
 ---
 
+## Recommended Proxy Domains
+
+The following domains benefit most from being routed through a proxy. Add them to your proxy rule list (e.g. in Clash, Surge, or any rule-based proxy tool):
+
+```
+https://open-vsx.org
+https://*.visualstudio.com
+https://*.microsoft.com
+https://aka.ms
+https://*.gallerycdn.vsassets.io
+https://*.github.com
+https://login.microsoftonline.com
+https://*.vscode.dev
+https://*.github.dev
+https://gh.io
+https://portal.azure.com
+https://raw.githubusercontent.com
+https://private-user-images.githubusercontent.com
+https://avatars.githubusercontent.com
+https://accounts.google.com
+https://*.google.com
+https://*.goog
+https://*.google
+```
+
+These include VS Code extension marketplace, GitHub assets, Microsoft identity services, Azure portal, and Google accounts — all commonly blocked or throttled in restricted network environments.
+
+---
+
 ## License
 
 [MIT](LICENSE) © 2026 [suifei](https://github.com/suifei)
