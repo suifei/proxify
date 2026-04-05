@@ -89,47 +89,6 @@ proxify -n "localhost,10.0.0.0/8" http://127.0.0.1:8080 my_app.exe
 
 ---
 
-## Real-world example: Google Antigravity
-
-[Google Antigravity](https://antigravity.thatworks.ai/) requires internet access through a proxy. Using `proxify` you can launch it with a single command without touching system-wide proxy settings.
-
-**Command:**
-
-```bat
-proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
-```
-
-**Working directory:** `D:\Antigravity`
-
-### Desktop shortcut (.bat)
-
-Create a file named `Antigravity.bat` anywhere you like (e.g. your Desktop):
-
-```bat
-@echo off
-rem Launch Antigravity through the local HTTP proxy at port 8081.
-rem Requires proxify.exe to be in your PATH, or update the path below.
-
-cd /d "D:\Antigravity"
-proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
-```
-
-> **Tip:** If `proxify.exe` is not in your `PATH`, replace `proxify.exe` with its full path,  
-> e.g. `C:\tools\proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe`.
-
-To keep the console window open on error, append `pause` at the end:
-
-```bat
-@echo off
-cd /d "D:\Antigravity"
-proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
-if errorlevel 1 pause
-```
-
-Double-click the `.bat` file (or pin it to Start / taskbar) — Antigravity will start with the proxy already inherited by all its internal network calls.
-
----
-
 ## How it works
 
 ```
