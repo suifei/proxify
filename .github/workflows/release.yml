@@ -1,0 +1,114 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-amd64
+            bin: proxify-linux-amd64
+          - os: ubuntu-22.04-arm
+            name: linux-arm64
+            bin: proxify-linux-arm64
+          - os: windows-2022
+            name: windows-amd64
+            bin: proxify-windows-amd64.exe
+          - os: macos-13
+            name: darwin-amd64
+            bin: proxify-darwin-amd64
+          - os: macos-14
+            name: darwin-arm64
+            bin: proxify-darwin-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cl /nologo /O2 /W3 /Fe:${{ matrix.bin }} proxify.c
+          ${{ matrix.bin }} -h
+
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          cc -O2 -Wall -Wextra -o "${{ matrix.bin }}" proxify.c
+          strip "${{ matrix.bin }}" || true
+          ls -l "${{ matrix.bin }}"
+          "./${{ matrix.bin }}" -h | head -n 8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin }}
+          path: ${{ matrix.bin }}
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -l
+          sha256sum * | tee SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
+          body: |
+            proxify **${{ github.ref_name }}** — 给任意进程（含 Cursor、ChatGPT Desktop 等 Electron 桌面软件）注入代理，不改系统全局代理。
+
+            ## 下载
+
+            | 平台 | 文件 |
+            |---|---|
+            | Windows x64 | `proxify-windows-amd64.exe` |
+            | macOS Apple Silicon | `proxify-darwin-arm64` |
+            | macOS Intel | `proxify-darwin-amd64` |
+            | Linux x64 | `proxify-linux-amd64` |
+            | Linux ARM64 | `proxify-linux-arm64` |
+
+            ## 1.1 相对 1.0
+
+            - 自动识别 Electron / CEF / Chromium，追加 `--proxy-server` 与 `--proxy-bypass-list`
+            - 为 WebView2 / Qt WebEngine 设置对应环境变量
+            - Windows GUI 程序启动后不再卡住控制台
+            - 本机回环默认绕过；`-n` 只追加额外主机
+
+            用法见仓库 README「给 Cursor、ChatGPT Desktop 这类软件挂代理」。
