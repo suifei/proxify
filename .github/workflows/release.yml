@@ -27,12 +27,14 @@ jobs:
           - os: windows-2022
             name: windows-amd64
             bin: proxify-windows-amd64.exe
-          - os: macos-13
+          - os: macos-14
             name: darwin-amd64
             bin: proxify-darwin-amd64
+            cflags: -target x86_64-apple-macos11
           - os: macos-14
             name: darwin-arm64
             bin: proxify-darwin-arm64
+            cflags: -target arm64-apple-macos11
 
     steps:
       - name: Checkout
@@ -53,7 +55,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           set -euo pipefail
-          cc -O2 -Wall -Wextra -o "${{ matrix.bin }}" proxify.c
+          cc -O2 -Wall -Wextra ${{ matrix.cflags }} -o "${{ matrix.bin }}" proxify.c
           strip "${{ matrix.bin }}" || true
           ls -l "${{ matrix.bin }}"
           "./${{ matrix.bin }}" -h | head -n 8
