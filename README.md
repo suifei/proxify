@@ -3,7 +3,7 @@
 > 给任意进程挂上代理。环境变量和浏览器内核参数会传给子进程、孙进程，**不用改 Windows / macOS 系统全局代理**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/suifei/proxify/releases/tag/v1.1.0)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/suifei/proxify/releases/tag/v1.3.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 [![Build](https://github.com/suifei/proxify/actions/workflows/release.yml/badge.svg)](https://github.com/suifei/proxify/actions/workflows/release.yml)
 
@@ -25,7 +25,7 @@
 
 ## 给 Cursor、ChatGPT Desktop 这类软件挂代理
 
-下面以本地 HTTP 代理 `http://127.0.0.1:7890` 为例。Clash / Clash Verge / mihomo 默认混合端口经常是 **7890**，v2rayN 常见 **10808 / 10809**，请改成你自己软件里显示的本地端口。
+下面以本地 HTTP 代理 `http://127.0.0.1:8080` 为例。Clash / Clash Verge / mihomo 默认混合端口经常是 **7890**，v2rayN 常见 **10808 / 10809**，请改成你自己软件里显示的本地端口。
 
 ### 0. 先装 proxify
 
@@ -71,33 +71,33 @@ Microsoft Store 版 ChatGPT 路径在 `WindowsApps` 里，比较别扭。能装�
 先在命令行试一次（把端口和路径换成你的）：
 
 ```bat
-proxify.exe -v http://127.0.0.1:7890 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
+proxify.exe -v http://127.0.0.1:8080 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
 ```
 
 ```bat
-proxify.exe -v http://127.0.0.1:7890 "%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe"
+proxify.exe -v http://127.0.0.1:8080 "%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe"
 ```
 
 `-v` 会在启动前打印实际生效的代理。看到类似下面这样就对了：
 
 ```
-[proxify] HTTP_PROXY  = http://127.0.0.1:7890
+[proxify] HTTP_PROXY  = http://127.0.0.1:8080
 [proxify] desktop    = gui, chromium-kernel
 [proxify] detach     = yes
-[proxify] inject     = --proxy-server=http://127.0.0.1:7890 --proxy-bypass-list=localhost;127.0.0.1;::1
+[proxify] inject     = --proxy-server=http://127.0.0.1:8080 --proxy-bypass-list=localhost;127.0.0.1;::1 --disable-quic
 ```
 
-`chromium-kernel` 表示识别到了 Electron，已经自动加上浏览器内核要的参数。如果没有识别到，加上 `-g` 强制按桌面软件处理：
+`chromium-kernel` 表示识别到了 Electron，已经自动加上浏览器内核要的参数（含 `--disable-quic`，避免 HTTP/3 绕过 CONNECT 代理）。如果没有识别到，加上 `-g` 强制按桌面软件处理：
 
 ```bat
-proxify.exe -g http://127.0.0.1:7890 "D:\path\to\ChatGPT.exe"
+proxify.exe -g http://127.0.0.1:8080 "D:\path\to\ChatGPT.exe"
 ```
 
 日常用的话，在桌面建一个 `Cursor-代理.bat`：
 
 ```bat
 @echo off
-set PROXY=http://127.0.0.1:7890
+set PROXY=http://127.0.0.1:8080
 set APP=%LOCALAPPDATA%\Programs\cursor\Cursor.exe
 
 if not exist "%APP%" (
@@ -115,7 +115,7 @@ ChatGPT Desktop 同理，把 `APP=` 换成 ChatGPT 的 exe。
 不想弹黑框：把 bat 发给自己做一个快捷方式，快捷方式属性里选「运行 → 最小化」。或者快捷方式目标直接写成：
 
 ```
-C:\tools\proxify.exe http://127.0.0.1:7890 C:\Users\你的用户名\AppData\Local\Programs\cursor\Cursor.exe
+C:\tools\proxify.exe http://127.0.0.1:8080 C:\Users\你的用户名\AppData\Local\Programs\cursor\Cursor.exe
 ```
 
 「起始位置」填 Cursor 的安装目录。以后点这个快捷方式，不要点官方原来那个。
@@ -129,18 +129,18 @@ proxify.exe -s socks5://127.0.0.1:7891 "%LOCALAPPDATA%\Programs\cursor\Cursor.ex
 ### 4. macOS：启动 .app 里面的二进制
 
 ```bash
-proxify -v http://127.0.0.1:7890 /Applications/Cursor.app/Contents/MacOS/Cursor
+proxify -v http://127.0.0.1:8080 /Applications/Cursor.app/Contents/MacOS/Cursor
 ```
 
 ```bash
-proxify -v http://127.0.0.1:7890 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+proxify -v http://127.0.0.1:8080 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
 ```
 
 想从 Dock / 访达双击启动，存成 `~/bin/cursor-proxy.command`（用文本编辑即可）：
 
 ```bash
 #!/bin/bash
-exec /usr/local/bin/proxify -g http://127.0.0.1:7890 \
+exec /usr/local/bin/proxify -g http://127.0.0.1:8080 \
   /Applications/Cursor.app/Contents/MacOS/Cursor
 ```
 
@@ -155,7 +155,7 @@ chmod +x ~/bin/cursor-proxy.command
 ### 5. Linux
 
 ```bash
-proxify -v http://127.0.0.1:7890 /usr/share/cursor/cursor
+proxify -v http://127.0.0.1:8080 /usr/share/cursor/cursor
 ```
 
 桌面项 `~/.local/share/applications/cursor-proxify.desktop`：
@@ -163,7 +163,7 @@ proxify -v http://127.0.0.1:7890 /usr/share/cursor/cursor
 ```ini
 [Desktop Entry]
 Name=Cursor (proxify)
-Exec=/usr/local/bin/proxify http://127.0.0.1:7890 /usr/share/cursor/cursor
+Exec=/usr/local/bin/proxify http://127.0.0.1:8080 /usr/share/cursor/cursor
 Terminal=false
 Type=Application
 Icon=cursor
@@ -172,20 +172,35 @@ Icon=cursor
 ### 6. 怎么确认真的走了代理
 
 1. 启动时加 `-v`，确认打印了 `HTTP_PROXY` 和 `--proxy-server`。
-2. 打开你的 Clash / v2rayN 连接日志，用 Cursor 聊天或 ChatGPT 发一条消息，日志里应出现对应连接。
+2. 打开你的 Clash / v2rayN / xray 连接日志，用 Cursor 聊天或 ChatGPT 发一条消息，日志里应出现对应连接。
 3. 不要去系统设置里开「使用代理服务器」。那是全局的，和 proxify 无关。
+
+### 6.1 Cursor 启动了，代理里却没有流量
+
+`--proxy-server` 只覆盖 Chromium 窗口。Cursor 的 Agent / 模型列表是 **Node.js HTTP/2**，会绕过启动参数和 `HTTP_PROXY`。
+
+proxify 1.3+ 会在 Cursor 的 `bootstrap-fork.js` 等入口注入 Node hook，把 `http` / `https` / `http2.connect` 改成走 HTTP CONNECT（或 SOCKS5）。启动时若看到 `patched Node entry ...bootstrap-fork.js` 就说明注入成功。
+
+按这个顺序做：
+
+1. **彻底退出**。托盘 Quit，任务管理器里确认没有 `Cursor.exe`（或 `taskkill /F /IM Cursor.exe`）。
+2. 再用 proxify 启动。第一次会改 Cursor 安装目录里的几个 JS 文件（加一行 loader，没有 `PROXIFY_NODE_HOOK` 环境变量时是空操作）。
+3. 在 xray / Clash 连接里搜 `api2.cursor.sh`。有 CONNECT 但出站 DIRECT，是规则问题，临时开全局模式试一次。
+4. Cursor 自动更新会覆盖 hook，再启动一次 proxify 就会重新注入。
+
+不想改 JS 文件时加 `--no-hook`。settings.json 里的 `http.proxy` 仍然建议保留。
 
 本机回环（`localhost` / `127.0.0.1` / `::1`）默认已经绕过，不用写 `-n`。只有还要放过公司内网时才追加：
 
 ```bat
-proxify.exe -n ".corp.local,10.0.0.0/8" http://127.0.0.1:7890 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
+proxify.exe -n ".corp.local,10.0.0.0/8" http://127.0.0.1:8080 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
 ```
 
 ### 7. 这类软件为什么不能只设环境变量
 
 | 软件栈 | 认不认 `HTTP_PROXY` | proxify 实际做的 |
 |---|---|---|
-| Cursor / ChatGPT Desktop / VS Code / Antigravity（Electron） | Windows 上基本不认 | 追加 `--proxy-server`、`--proxy-bypass-list`，Node 侧仍靠环境变量 |
+| Cursor / ChatGPT Desktop / VS Code / Antigravity（Electron） | Windows 上基本不认 | 追加 `--proxy-server`、`--proxy-bypass-list`、`--disable-quic`；Cursor Agent 还要在 settings.json 里写 `http.proxy` 和 `cursor.general.disableHttp2`（见 6.1） |
 | WebView2 套壳 | 不认 | 设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` |
 | Qt WebEngine | 通常不认 | 设置 `QTWEBENGINE_CHROMIUM_FLAGS` |
 | curl / git / Python / Go | 认 | 只设环境变量就够 |
@@ -196,9 +211,9 @@ proxify.exe -n ".corp.local,10.0.0.0/8" http://127.0.0.1:7890 "%LOCALAPPDATA%\Pr
 
 ## Features
 
-- Sets **6 proxy environment variables** automatically: `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and their lowercase counterparts — compatible with curl, wget, Go, Node.js, Python requests, and virtually every other HTTP library
+- Sets **6 proxy environment variables** automatically: `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and their lowercase counterparts — compatible with curl, wget, Go, Node.js, Python requests, and virtually every other HTTP library. Also sets `NODE_USE_ENV_PROXY=1` so Node 22+ undici/fetch reads those variables
 - Loopback (`localhost`, `127.0.0.1`, `::1`) is always on `NO_PROXY` and `--proxy-bypass-list`. `-n` only adds extra hosts — you do not pass loopback yourself
-- **Desktop / browser-kernel apps**: Electron, CEF, Chromium, WebView2, and Qt WebEngine are detected automatically. On Windows those stacks ignore `HTTP_PROXY`, so proxify also injects `--proxy-server` and `--proxy-bypass-list` (or the matching framework environment variable)
+- **Desktop / browser-kernel apps**: Electron, CEF, Chromium, WebView2, and Qt WebEngine are detected automatically. On Windows those stacks ignore `HTTP_PROXY`, so proxify also injects `--proxy-server`, `--proxy-bypass-list`, and `--disable-quic` (or the matching framework environment variable). Cursor / VS Code Agent HTTP/2 still needs `http.proxy` + `cursor.general.disableHttp2` in settings.json — see the Cursor section above
 - **Windows GUI**: PE subsystem `WINDOWS_GUI` is launched detached — the console does not stay open until you quit the app. Console programs still wait and forward the exit code. Force either side with `-g` / `-w`
 - **Unix**: uses `execvp` to replace the current process — zero overhead. `-g` forks, `setsid()`, and returns immediately
 - All child and grandchild processes inherit the environment automatically
@@ -254,7 +269,8 @@ proxify [options] <command> [args...]
 | `-n <hosts>` | Extra bypass hosts for `NO_PROXY` / `no_proxy` **and** `--proxy-bypass-list`. Loopback is always included |
 | `-g`, `--gui` | Desktop mode: detach and always inject browser proxy flags |
 | `-w`, `--wait` | Wait for the process (default for console programs) |
-| `--no-flags` | Do not append `--proxy-server` / `--proxy-bypass-list` to argv (env vars are still set) |
+| `--no-flags` | Do not append `--proxy-server` / `--proxy-bypass-list` / `--disable-quic` to argv (env vars are still set) |
+| `--no-hook` | Do not patch Cursor / VS Code JS so Node `http2` uses the proxy |
 | `-v` | Print effective proxy settings before launching |
 | `-h` | Show help |
 
@@ -290,7 +306,7 @@ Most desktop programs built on a browser kernel **do not**. On Windows they use 
 
 | Stack | Honors `HTTP_PROXY`? | External parameter that works |
 |---|---|---|
-| Electron / Chromium / CEF (VS Code, Cursor, Antigravity, Chrome, Edge, CEF hosts) | No on Windows | `--proxy-server=` and `--proxy-bypass-list=` on the process command line |
+| Electron / Chromium / CEF (VS Code, Cursor, Antigravity, Chrome, Edge, CEF hosts) | No on Windows | `--proxy-server=`, `--proxy-bypass-list=`, `--disable-quic` on the process command line. Cursor/VS Code Agent HTTP/2 still needs `http.proxy` in settings.json |
 | WebView2 (WinUI / WPF / WinForms hosts) | No | `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` |
 | Qt WebEngine | Usually no | `QTWEBENGINE_CHROMIUM_FLAGS` |
 | Ordinary Win32 / .NET with no browser kernel | N/A | Environment only — extra Chromium flags are **not** injected unless you pass `-g` |
@@ -299,7 +315,7 @@ proxify therefore does three things when it launches a target:
 
 1. Sets the usual proxy environment variables, including `NO_PROXY` / `no_proxy`.
 2. Always sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` and `QTWEBENGINE_CHROMIUM_FLAGS` to `--proxy-server=… --proxy-bypass-list=…`. Harmless if the app is not WebView2 / Qt.
-3. If the executable looks like Electron / CEF / Chromium (sibling files such as `chrome_elf.dll`, `libcef.dll`, `resources/app.asar`, …) **or** you passed `-g`, appends those two switches to argv. Existing `--proxy-server` / `--proxy-bypass-list` on the command line are left untouched.
+3. If the executable looks like Electron / CEF / Chromium (sibling files such as `chrome_elf.dll`, `libcef.dll`, `resources/app.asar`, `resources/app/product.json`, …) **or** you passed `-g`, appends `--proxy-server`, `--proxy-bypass-list`, and `--disable-quic` to argv. Existing copies of those switches on the command line are left untouched.
 
 Loopback is always bypassed. `-n` only adds extras: `-n ".corp.local"` becomes `NO_PROXY=localhost,127.0.0.1,::1,.corp.local` and `--proxy-bypass-list=localhost;127.0.0.1;::1;.corp.local`.
 
@@ -368,9 +384,11 @@ proxify http://proxy:8080  my_app.exe
    ├─ sets NO_PROXY / no_proxy          (always localhost,127.0.0.1,::1, plus -n / existing env)
    ├─ sets WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
    ├─ sets QTWEBENGINE_CHROMIUM_FLAGS
+   ├─ sets NODE_USE_ENV_PROXY=1
    ├─ if Electron / CEF / Chromium / -g:
    │     appends --proxy-server=…
    │     appends --proxy-bypass-list=…   (same hosts as NO_PROXY)
+   │     appends --disable-quic
    │
    └─ CreateProcess / execvp ──► my_app.exe
                                      └──► child processes  (inherit env + flags)

@@ -9,8 +9,8 @@
  *
  * Sets: HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY (and lowercase variants).
  * Browser-kernel desktop apps also receive --proxy-server / --proxy-bypass-list
- * (and WebView2 / Qt WebEngine equivalents). Loopback is always on the bypass
- * list; -n only adds extra hosts to NO_PROXY and --proxy-bypass-list.
+ * / --disable-quic (and WebView2 / Qt WebEngine equivalents). Loopback is always
+ * on the bypass list; -n only adds extra hosts to NO_PROXY and --proxy-bypass-list.
  *
  * Build:
  *   gcc -O2 -o proxify proxify.c        (Linux/macOS)
@@ -27,8 +27,12 @@
 #include <string.h>
 
 #ifdef _WIN32
+  #ifndef _WIN32_WINNT
+    #define _WIN32_WINNT 0x0601
+  #endif
   #include <process.h>
   #include <windows.h>
+  #include <tlhelp32.h>
 #else
   #include <limits.h>
   #include <unistd.h>
@@ -39,8 +43,16 @@
 #endif
 #endif
 
-#define VERSION "1.1.0"
+#define VERSION "1.3.0"
 #define DEFAULT_NO_PROXY "localhost,127.0.0.1,::1"
+#define HOOK_MARKER "PROXIFY_NODE_HOOK"
+
+#include "proxify-hook.inc"
+
+static const char kEsmHookPrepend[] =
+    "/*PROXIFY_NODE_HOOK*/\n"
+    "import{createRequire as __pxCR}from'node:module';\n"
+    "try{__pxCR(import.meta.url)('./proxify-hook.cjs')}catch(e){}\n";
 
 #ifdef _WIN32
   #define PATH_SEP '\\'
@@ -216,9 +228,16 @@ static void set_proxy_env(const char *http, const char *socks, const char *no_pr
     if (all) {
         set_env("ALL_PROXY", all);
         set_env("all_proxy", all);
+        /* global-agent (Node) and similar libraries. */
+        set_env("GLOBAL_AGENT_HTTP_PROXY", all);
+        set_env("GLOBAL_AGENT_HTTPS_PROXY", all);
     }
     set_env("NO_PROXY", no_proxy);
     set_env("no_proxy", no_proxy);
+    if (all)
+        set_env("GLOBAL_AGENT_NO_PROXY", no_proxy);
+    /* Node 22+ undici/fetch honors HTTP_PROXY only when this is set. */
+    set_env("NODE_USE_ENV_PROXY", "1");
 }
 
 /* WebView2 / Qt WebEngine read these instead of (or in addition to) argv. */
@@ -228,10 +247,11 @@ static void set_browser_proxy_env(const char *proxy_server, const char *bypass)
 
     if (bypass && bypass[0])
         snprintf(extra, sizeof(extra),
-                 "--proxy-server=%s --proxy-bypass-list=%s",
+                 "--proxy-server=%s --proxy-bypass-list=%s --disable-quic --disable-http2",
                  proxy_server, bypass);
     else
-        snprintf(extra, sizeof(extra), "--proxy-server=%s", proxy_server);
+        snprintf(extra, sizeof(extra),
+                 "--proxy-server=%s --disable-quic --disable-http2", proxy_server);
 
     set_env("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", extra);
     set_env("QTWEBENGINE_CHROMIUM_FLAGS", extra);
@@ -391,6 +411,7 @@ static int is_chromium_app(const char *exe)
         "LICENSES.chromium.html",
         "resources\\app.asar",
         "resources\\electron.asar",
+        "resources\\app\\product.json",
         NULL
     };
 #else
@@ -403,6 +424,7 @@ static int is_chromium_app(const char *exe)
         "chrome_100_percent.pak",
         "resources/app.asar",
         "resources/electron.asar",
+        "resources/app/product.json",
         NULL
     };
 #endif
@@ -427,6 +449,414 @@ static int is_chromium_app(const char *exe)
     }
 #endif
     return 0;
+}
+
+static int is_vscode_family(const char *exe)
+{
+    char dir[EXE_PATH_MAX], cand[EXE_PATH_MAX];
+
+    path_dirname(exe, dir, sizeof(dir));
+#ifdef _WIN32
+    if (path_join(cand, sizeof(cand), dir, "resources\\app\\product.json") &&
+        file_exists(cand))
+        return 1;
+#else
+    if (path_join(cand, sizeof(cand), dir, "resources/app/product.json") &&
+        file_exists(cand))
+        return 1;
+    if (strstr(dir, ".app/Contents/MacOS")) {
+        char contents[EXE_PATH_MAX];
+        path_dirname(dir, contents, sizeof(contents));
+        if (path_join(cand, sizeof(cand), contents, "Resources/app/product.json") &&
+            file_exists(cand))
+            return 1;
+    }
+#endif
+    return 0;
+}
+
+static const char *path_basename(const char *path)
+{
+    const char *base = path, *p;
+
+    for (p = path; *p; p++) {
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    }
+    return base;
+}
+
+#ifdef _WIN32
+static DWORD find_running_exe(const char *exe)
+{
+    HANDLE snap;
+    PROCESSENTRY32 pe;
+    DWORD self = GetCurrentProcessId();
+    DWORD found = 0;
+
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+        return 0;
+    pe.dwSize = sizeof(pe);
+    if (!Process32First(snap, &pe)) {
+        CloseHandle(snap);
+        return 0;
+    }
+    do {
+        HANDLE h;
+        char path[MAX_PATH];
+        DWORD n = MAX_PATH;
+
+        if (pe.th32ProcessID == self)
+            continue;
+        h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!h)
+            continue;
+        if (QueryFullProcessImageNameA(h, 0, path, &n) &&
+            _stricmp(path, exe) == 0)
+            found = pe.th32ProcessID;
+        CloseHandle(h);
+        if (found)
+            break;
+    } while (Process32Next(snap, &pe));
+    CloseHandle(snap);
+    return found;
+}
+#endif
+
+static int write_bytes(const char *path, const char *data, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    size_t w;
+
+    if (!f)
+        return 0;
+    w = fwrite(data, 1, len, f);
+    fclose(f);
+    return w == len;
+}
+
+static int looks_like_esm(const char *head)
+{
+    return strstr(head, "import.meta") != NULL ||
+           strstr(head, "export function") != NULL ||
+           strstr(head, "export default") != NULL ||
+           strstr(head, "export const") != NULL;
+}
+
+static void slash_path(const char *in, char *out, size_t n)
+{
+    size_t j = 0;
+
+    for (; *in && j + 1 < n; in++)
+        out[j++] = (*in == '\\') ? '/' : *in;
+    out[j] = '\0';
+}
+
+static size_t hook_prefix_len(const char *data, size_t len)
+{
+    size_t i = 0;
+
+    if (len < 21 || strncmp(data, "/*" HOOK_MARKER "*/", 21) != 0)
+        return 0;
+    while (i < len) {
+        size_t start = i;
+        char line[768];
+        size_t n;
+
+        while (i < len && data[i] != '\n')
+            i++;
+        if (i < len)
+            i++;
+        n = i - start;
+        if (n >= sizeof(line))
+            n = sizeof(line) - 1;
+        memcpy(line, data + start, n);
+        line[n] = '\0';
+        if (strstr(line, HOOK_MARKER) || strstr(line, "__pxCR") ||
+            strstr(line, "proxify-hook"))
+            continue;
+        return start;
+    }
+    return i;
+}
+
+static int apply_hook_snippet(const char *path, const char *abs_hook_slash, int verbose)
+{
+    FILE *f;
+    char *data, *out;
+    size_t total, skip, plen, rest;
+    long pos;
+    char cjs_prefix[EXE_PATH_MAX + 160];
+    const char *prefix;
+    const char *head;
+
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+    pos = ftell(f);
+    if (pos < 0) {
+        fclose(f);
+        return -1;
+    }
+    total = (size_t)pos;
+    data = (char *)malloc(total + 1);
+    if (!data) {
+        fclose(f);
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0 || fread(data, 1, total, f) != total) {
+        free(data);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    data[total] = '\0';
+    skip = hook_prefix_len(data, total);
+    head = data + skip;
+    if (looks_like_esm(head) && strstr(path, "bootstrap-fork") != NULL)
+        prefix = kEsmHookPrepend;
+    else {
+        snprintf(cjs_prefix, sizeof(cjs_prefix),
+                 "/*PROXIFY_NODE_HOOK*/try{require(\"%s\")}catch(e){}\n",
+                 abs_hook_slash);
+        prefix = cjs_prefix;
+    }
+    plen = strlen(prefix);
+    rest = total - skip;
+    if (skip == plen && strncmp(data, prefix, plen) == 0) {
+        free(data);
+        if (verbose)
+            fprintf(stderr, "[proxify] node-hook already in %s\n", path);
+        return 0;
+    }
+    out = (char *)malloc(plen + rest);
+    if (!out) {
+        free(data);
+        return -1;
+    }
+    memcpy(out, prefix, plen);
+    if (rest)
+        memcpy(out + plen, data + skip, rest);
+    if (!write_bytes(path, out, plen + rest)) {
+        free(out);
+        free(data);
+        return -1;
+    }
+    free(out);
+    free(data);
+    return 1;
+}
+
+static int strip_hook_snippet(const char *path, int verbose)
+{
+    FILE *f;
+    char *data;
+    size_t total, skip;
+    long pos;
+
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+    pos = ftell(f);
+    if (pos < 0) {
+        fclose(f);
+        return -1;
+    }
+    total = (size_t)pos;
+    data = (char *)malloc(total + 1);
+    if (!data) {
+        fclose(f);
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0 || fread(data, 1, total, f) != total) {
+        free(data);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    data[total] = '\0';
+    skip = hook_prefix_len(data, total);
+    if (skip == 0) {
+        free(data);
+        return 0;
+    }
+    if (!write_bytes(path, data + skip, total - skip)) {
+        free(data);
+        return -1;
+    }
+    free(data);
+    (void)verbose;
+    return 1;
+}
+
+static int copy_file(const char *src, const char *dst)
+{
+    FILE *in, *out;
+    char buf[8192];
+    size_t n;
+
+    in = fopen(src, "rb");
+    if (!in)
+        return 0;
+    out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return 0;
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            return 0;
+        }
+    }
+    fclose(in);
+    fclose(out);
+    return 1;
+}
+
+static int sibling_hook_js(char *out, size_t n, const char *argv0)
+{
+    char self[EXE_PATH_MAX], dir[EXE_PATH_MAX];
+
+#ifdef _WIN32
+    {
+        DWORD r = GetModuleFileNameA(NULL, self, (DWORD)sizeof(self));
+        if (r == 0 || r >= sizeof(self))
+            snprintf(self, sizeof(self), "%s", argv0 ? argv0 : "");
+    }
+#elif defined(__linux__)
+    {
+        ssize_t r = readlink("/proc/self/exe", self, sizeof(self) - 1);
+        if (r > 0)
+            self[r] = '\0';
+        else
+            snprintf(self, sizeof(self), "%s", argv0 ? argv0 : "");
+    }
+#else
+    snprintf(self, sizeof(self), "%s", argv0 ? argv0 : "");
+#endif
+    path_dirname(self, dir, sizeof(dir));
+    return path_join(out, n, dir, "proxify-hook.js") && file_exists(out);
+}
+
+static int vscode_app_dir(const char *exe, char *out, size_t n)
+{
+    char dir[EXE_PATH_MAX], cand[EXE_PATH_MAX];
+
+    path_dirname(exe, dir, sizeof(dir));
+#ifdef _WIN32
+    if (path_join(cand, sizeof(cand), dir, "resources\\app") && file_exists(cand)) {
+        snprintf(out, n, "%s", cand);
+        return 1;
+    }
+#else
+    if (path_join(cand, sizeof(cand), dir, "resources/app") && file_exists(cand)) {
+        snprintf(out, n, "%s", cand);
+        return 1;
+    }
+    if (strstr(dir, ".app/Contents/MacOS")) {
+        char contents[EXE_PATH_MAX];
+        path_dirname(dir, contents, sizeof(contents));
+        if (path_join(cand, sizeof(cand), contents, "Resources/app") &&
+            file_exists(cand)) {
+            snprintf(out, n, "%s", cand);
+            return 1;
+        }
+    }
+#endif
+    return 0;
+}
+
+static int inject_vscode_node_hook(const char *exe, const char *argv0, int verbose)
+{
+    char app[EXE_PATH_MAX], hook[EXE_PATH_MAX], cand[EXE_PATH_MAX];
+    char sibling[EXE_PATH_MAX], hook_slash[EXE_PATH_MAX];
+    int i, patched = 0, failed = 0;
+#ifdef _WIN32
+    /* Only bootstrap-fork.js: Cursor verifies extension hashes (always-local
+     * dist/main.js). Patching those files disables Connect transport. */
+    static const char *const targets[] = {
+        "out\\bootstrap-fork.js",
+        NULL
+    };
+    static const char *const revert_targets[] = {
+        "extensions\\cursor-always-local\\dist\\main.js",
+        "extensions\\cursor-agent-worker\\dist\\main.js",
+        "extensions\\cursor-agent-host\\dist\\main.js",
+        NULL
+    };
+#else
+    static const char *const targets[] = {
+        "out/bootstrap-fork.js",
+        NULL
+    };
+    static const char *const revert_targets[] = {
+        "extensions/cursor-always-local/dist/main.js",
+        "extensions/cursor-agent-worker/dist/main.js",
+        "extensions/cursor-agent-host/dist/main.js",
+        NULL
+    };
+#endif
+
+    if (!vscode_app_dir(exe, app, sizeof(app)))
+        return 0;
+#ifdef _WIN32
+    if (!path_join(hook, sizeof(hook), app, "out\\proxify-hook.cjs"))
+        return 0;
+#else
+    if (!path_join(hook, sizeof(hook), app, "out/proxify-hook.cjs"))
+        return 0;
+#endif
+    if (sibling_hook_js(sibling, sizeof(sibling), argv0)) {
+        if (!copy_file(sibling, hook)) {
+            fprintf(stderr, "[proxify] WARNING: could not copy Node proxy hook\n");
+            return 0;
+        }
+    } else if (!write_bytes(hook, kProxifyHookJs, strlen(kProxifyHookJs))) {
+        fprintf(stderr, "[proxify] WARNING: could not write Node proxy hook\n");
+        return 0;
+    }
+    slash_path(hook, hook_slash, sizeof(hook_slash));
+    set_env("PROXIFY_NODE_HOOK", hook);
+    if (verbose)
+        set_env("PROXIFY_HOOK_DEBUG", "1");
+
+    for (i = 0; revert_targets[i]; i++) {
+        int pr;
+        if (!path_join(cand, sizeof(cand), app, revert_targets[i]) || !file_exists(cand))
+            continue;
+        pr = strip_hook_snippet(cand, verbose);
+        if (pr > 0)
+            fprintf(stderr, "[proxify] restored extension file %s\n", cand);
+        else if (pr < 0)
+            fprintf(stderr, "[proxify] WARNING: could not restore %s\n", cand);
+    }
+
+    for (i = 0; targets[i]; i++) {
+        int pr;
+        if (!path_join(cand, sizeof(cand), app, targets[i]) || !file_exists(cand))
+            continue;
+        pr = apply_hook_snippet(cand, hook_slash, verbose);
+        if (pr > 0) {
+            patched++;
+            fprintf(stderr, "[proxify] patched Node entry %s\n", cand);
+        } else if (pr < 0) {
+            failed++;
+            fprintf(stderr, "[proxify] WARNING: could not patch %s\n", cand);
+        }
+    }
+    fprintf(stderr, "[proxify] node-hook   = %s\n", hook);
+    return patched;
 }
 
 static int has_flag_prefix(int argc, char **argv, int start, const char *prefix)
@@ -471,13 +901,15 @@ static void usage(void)
         "                  " DEFAULT_NO_PROXY ")\n"
         "  -g, --gui       Desktop mode: detach and inject browser proxy flags\n"
         "  -w, --wait      Wait for the process (default for console programs)\n"
-        "  --no-flags      Do not append --proxy-server / --proxy-bypass-list\n"
+        "  --no-flags      Do not append Chromium proxy flags (--proxy-server, --disable-http2, ...)\n"
+        "  --no-hook       Do not patch Cursor/VS Code JS to proxy Node http2\n"
         "  -v              Show proxy settings before launching\n"
         "  -h              Show this help\n\n"
         "Desktop / browser-kernel apps (Electron, CEF, Chromium, WebView2, Qt):\n"
         "  Detected automatically. Env vars alone are not enough on Windows;\n"
-        "  proxify also passes --proxy-server and --proxy-bypass-list.\n"
-        "  -n adds hosts to both NO_PROXY and --proxy-bypass-list.\n\n"
+        "  proxify also passes --proxy-server, --proxy-bypass-list, --disable-quic, --disable-http2.\n"
+        "  Cursor / VS Code: also injects a Node hook so Agent HTTP/2 uses CONNECT.\n"
+        "  Fully Quit the app first (single-instance otherwise ignores new flags).\n\n"
         "Examples:\n"
         "  proxify http://127.0.0.1:8080 curl https://example.com\n"
         "  proxify -n \"10.0.0.0/8,.corp.local\" http://127.0.0.1:8080 app.exe\n"
@@ -494,18 +926,23 @@ int main(int argc, char *argv[])
     int force_gui = 0;
     int force_wait = 0;
     int no_flags = 0;
+    int no_hook = 0;
     int cmd_start = 0;
     int i;
     int is_gui = 0;
     int is_chrome = 0;
+    int is_vscode = 0;
     int inject_argv = 0;
     int detach = 0;
     int resolved_ok = 0;
     char resolved[EXE_PATH_MAX];
+    char workdir[EXE_PATH_MAX];
     char no_proxy[2048];
     char bypass[1024];
     char proxy_switch[768];
     char bypass_switch[1280];
+    char quic_switch[32];
+    char http2_switch[32];
 
     if (argc < 2) { usage(); return 1; }
 
@@ -520,6 +957,8 @@ int main(int argc, char *argv[])
             force_wait = 1;
         } else if (strcmp(argv[i], "--no-flags") == 0) {
             no_flags = 1;
+        } else if (strcmp(argv[i], "--no-hook") == 0) {
+            no_hook = 1;
         } else if (strcmp(argv[i], "-s") == 0) {
             if (++i >= argc) { fprintf(stderr, "proxify: -s requires an argument\n"); return 1; }
             socks_proxy = argv[i];
@@ -563,10 +1002,17 @@ int main(int argc, char *argv[])
     set_browser_proxy_env(proxy_server, bypass);
 
     resolved[0] = '\0';
+    workdir[0] = '\0';
     resolved_ok = resolve_exe(argv[cmd_start], resolved, sizeof(resolved));
     if (resolved_ok) {
         is_gui = is_gui_exe(resolved);
         is_chrome = is_chromium_app(resolved);
+        is_vscode = is_vscode_family(resolved);
+        if (is_vscode)
+            is_chrome = 1;
+        path_dirname(resolved, workdir, sizeof(workdir));
+        if (is_vscode && !no_hook)
+            inject_vscode_node_hook(resolved, argv[0], verbose);
     }
     if (force_gui)
         is_gui = 1;
@@ -576,20 +1022,21 @@ int main(int argc, char *argv[])
         detach = 0;
 
     inject_argv = !no_flags && (force_gui || is_chrome);
+    proxy_switch[0] = '\0';
+    bypass_switch[0] = '\0';
+    quic_switch[0] = '\0';
+    http2_switch[0] = '\0';
     if (inject_argv) {
         if (!has_flag_prefix(argc, argv, cmd_start, "--proxy-server"))
             snprintf(proxy_switch, sizeof(proxy_switch), "--proxy-server=%s", proxy_server);
-        else
-            proxy_switch[0] = '\0';
         if (bypass[0] && !has_flag_prefix(argc, argv, cmd_start, "--proxy-bypass-list"))
             snprintf(bypass_switch, sizeof(bypass_switch), "--proxy-bypass-list=%s", bypass);
-        else
-            bypass_switch[0] = '\0';
-        if (!proxy_switch[0] && !bypass_switch[0])
+        if (!has_flag_prefix(argc, argv, cmd_start, "--disable-quic"))
+            snprintf(quic_switch, sizeof(quic_switch), "--disable-quic");
+        if (!has_flag_prefix(argc, argv, cmd_start, "--disable-http2"))
+            snprintf(http2_switch, sizeof(http2_switch), "--disable-http2");
+        if (!proxy_switch[0] && !bypass_switch[0] && !quic_switch[0] && !http2_switch[0])
             inject_argv = 0;
-    } else {
-        proxy_switch[0] = '\0';
-        bypass_switch[0] = '\0';
     }
 
     if (verbose) {
@@ -598,23 +1045,47 @@ int main(int argc, char *argv[])
         v = getenv("HTTPS_PROXY"); fprintf(stderr, "[proxify] HTTPS_PROXY = %s\n", v ? v : "(unset)");
         v = getenv("ALL_PROXY");   fprintf(stderr, "[proxify] ALL_PROXY   = %s\n", v ? v : "(unset)");
         v = getenv("NO_PROXY");    fprintf(stderr, "[proxify] NO_PROXY    = %s\n", v ? v : "(unset)");
+        v = getenv("NODE_USE_ENV_PROXY");
+        fprintf(stderr, "[proxify] NODE_USE_ENV_PROXY = %s\n", v ? v : "(unset)");
         v = getenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
         fprintf(stderr, "[proxify] WEBVIEW2 / Qt flags = %s\n", v ? v : "(unset)");
         fprintf(stderr, "[proxify] target     = %s\n",
                 resolved_ok ? resolved : argv[cmd_start]);
-        fprintf(stderr, "[proxify] desktop    = %s%s\n",
+        fprintf(stderr, "[proxify] desktop    = %s%s%s\n",
                 is_gui ? "gui" : "console",
-                is_chrome ? ", chromium-kernel" : "");
+                is_chrome ? ", chromium-kernel" : "",
+                is_vscode ? ", vscode-family" : "");
         fprintf(stderr, "[proxify] detach     = %s\n", detach ? "yes" : "no (wait)");
-        if (proxy_switch[0] || bypass_switch[0]) {
+        if (proxy_switch[0] || bypass_switch[0] || quic_switch[0] || http2_switch[0]) {
             fprintf(stderr, "[proxify] inject     =");
             if (proxy_switch[0]) fprintf(stderr, " %s", proxy_switch);
             if (bypass_switch[0]) fprintf(stderr, " %s", bypass_switch);
+            if (quic_switch[0]) fprintf(stderr, " %s", quic_switch);
+            if (http2_switch[0]) fprintf(stderr, " %s", http2_switch);
             fprintf(stderr, "\n");
         } else {
             fprintf(stderr, "[proxify] inject     = (none)\n");
         }
         fprintf(stderr, "[proxify] exec: %s\n", argv[cmd_start]);
+    }
+
+#ifdef _WIN32
+    if (resolved_ok && (is_gui || is_chrome || is_vscode)) {
+        DWORD running = find_running_exe(resolved);
+        if (running) {
+            fprintf(stderr,
+                "[proxify] WARNING: %s is already running (pid %lu).\n"
+                "[proxify] Electron/VS Code reuse the first instance and ignore new proxy flags.\n"
+                "[proxify] Fully Quit from the tray, or: taskkill /F /IM %s\n",
+                path_basename(resolved), (unsigned long)running,
+                path_basename(resolved));
+        }
+    }
+#endif
+    if (is_vscode && no_hook) {
+        fprintf(stderr,
+            "[proxify] note: --no-hook set. Cursor Agent HTTP/2 will not use the proxy\n"
+            "[proxify]       unless settings.json has http.proxy and disableHttp2.\n");
     }
 
 #ifdef _WIN32
@@ -644,12 +1115,21 @@ int main(int argc, char *argv[])
             fprintf(stderr, "proxify: command line too long\n");
             return 1;
         }
+        if (quic_switch[0] && append_arg(cmdline, sizeof(cmdline), quic_switch) != 0) {
+            fprintf(stderr, "proxify: command line too long\n");
+            return 1;
+        }
+        if (http2_switch[0] && append_arg(cmdline, sizeof(cmdline), http2_switch) != 0) {
+            fprintf(stderr, "proxify: command line too long\n");
+            return 1;
+        }
 
         if (detach)
             flags |= DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
 
         if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
-                            flags, NULL, NULL, &si, &pi)) {
+                            flags, NULL,
+                            workdir[0] ? workdir : NULL, &si, &pi)) {
             fprintf(stderr, "proxify: failed to launch '%s' (error %lu)\n",
                     argv[cmd_start], GetLastError());
             return 127;
@@ -674,6 +1154,8 @@ int main(int argc, char *argv[])
 
         if (proxy_switch[0]) extra++;
         if (bypass_switch[0]) extra++;
+        if (quic_switch[0]) extra++;
+        if (http2_switch[0]) extra++;
         if (argc - cmd_start + extra + 1 > 256) {
             fprintf(stderr, "proxify: too many arguments\n");
             return 1;
@@ -684,7 +1166,16 @@ int main(int argc, char *argv[])
             newargv[n++] = proxy_switch;
         if (bypass_switch[0])
             newargv[n++] = bypass_switch;
+        if (quic_switch[0])
+            newargv[n++] = quic_switch;
+        if (http2_switch[0])
+            newargv[n++] = http2_switch;
         newargv[n] = NULL;
+
+        if (workdir[0] && chdir(workdir) != 0) {
+            fprintf(stderr, "proxify: chdir '%s': ", workdir);
+            perror(NULL);
+        }
 
         if (detach) {
             pid_t pid = fork();
