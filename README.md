@@ -76,7 +76,7 @@ xattr -d com.apple.quarantine proxify
 ## 桌面软件指南
 
 > **第一步永远是：彻底退出原软件。**
-> Cursor、ChatGPT 关掉窗口后通常还活在托盘里。Electron 是单实例的，你再开一次只会唤醒旧的那份，新参数会被直接丢掉。请在托盘图标上右键 **Quit / 退出**，或者 `taskkill /F /IM Cursor.exe`。proxify 发现目标已在运行时会打印警告。
+> Cursor、ChatGPT 关掉窗口后通常还活在托盘里。Electron 是单实例的，你再开一次只会唤醒旧的那份，新参数会被直接丢掉。请在托盘图标上右键 **Quit / 退出**，或者 `taskkill /F /IM Cursor.exe`；macOS 上按 **Cmd+Q**（只点红色关闭按钮不算退出）。proxify 发现目标已在运行时会打印警告。
 
 ### ChatGPT Desktop / Codex
 
@@ -84,13 +84,27 @@ xattr -d com.apple.quarantine proxify
 proxify.exe http://127.0.0.1:8080 -app chatgpt
 ```
 
-就这一行。`-app codex` 是同一个东西 —— Windows 上 ChatGPT 和 Codex 现在是同一个商店包。
+```bash
+proxify http://127.0.0.1:8080 -app chatgpt        # macOS
+```
+
+就这一行。`-app codex` 是同一个东西 —— ChatGPT 和 Codex 现在是同一个软件包（Windows 商店包 `OpenAI.Codex`，macOS bundle id `com.openai.codex`）。
 
 为什么要内置名字：ChatGPT 是 Windows 商店（MSIX）软件，装在 `C:\Program Files\WindowsApps\OpenAI.Codex_<版本号>_x64__...\` 下面，**每次自动更新路径都会变**，写死在快捷方式里过几天就失效。`-app chatgpt` 会在启动时查出当前的安装目录和主程序。
 
 它内部是 Chromium 内核加一个 Rust 写的 `codex.exe` 子进程：前者吃 `--proxy-server`，后者认 `HTTPS_PROXY`，proxify 两样都给了，**不需要改它的任何文件**。实测界面、登录、对话、Agent 的连接全部走代理。
 
-macOS 上 `-app chatgpt` 指向 `/Applications/ChatGPT.app/Contents/MacOS/ChatGPT`。
+**macOS。** `-app chatgpt` 会在 `/Applications` 和 `~/Applications` 里找 `ChatGPT.app`（旧安装叫 `Codex.app`），从 `Info.plist` 取主程序，注入参数后脱离终端启动，命令立刻返回。现在的 macOS 版和 Windows 版是同一个 Electron 包，只是把内核框架改名成了 `Codex Framework.framework` —— 1.4.0 及以前认不出它，只设了环境变量，界面连不上；1.5.0 起按框架里的 Chromium 资源文件识别，改什么名都认得。
+
+`-v` 应该看到：
+
+```
+[proxify] target     = /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+[proxify] desktop    = gui, chromium-kernel
+[proxify] inject     = --proxy-server=http://127.0.0.1:8080 ...
+```
+
+如果提示 `is not the Electron build`，说明装的还是早期的原生（Swift）版 ChatGPT：它只跟系统代理走，任何环境变量和启动参数都无效，升级到当前版本即可。
 
 **其他商店软件**没有内置名字时，用通用写法 `appx:<PackageFamilyName>`：
 
@@ -113,8 +127,8 @@ proxify.exe -v http://127.0.0.1:8080 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
 
 | 软件 | Windows 默认位置 | macOS |
 |---|---|---|
-| Cursor | `%LOCALAPPDATA%\Programs\cursor\Cursor.exe` | `/Applications/Cursor.app/Contents/MacOS/Cursor` |
-| VS Code | `%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe` | `/Applications/Visual Studio Code.app/Contents/MacOS/Electron` |
+| Cursor | `%LOCALAPPDATA%\Programs\cursor\Cursor.exe` | `/Applications/Cursor.app` |
+| VS Code | `%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe` | `"/Applications/Visual Studio Code.app"` |
 
 **Cursor 多出来的一层。** `--proxy-server` 只管 Chromium 窗口；Cursor 的 Agent 和模型列表走的是 **Node.js 的 HTTP/2**，既不吃启动参数也不认 `HTTP_PROXY`。所以 proxify 识别到 Cursor / VS Code 家族（`resources/app/product.json`）时会额外做一件事：
 
@@ -141,7 +155,7 @@ Antigravity、Windsurf、Trae、Chrome、Edge 以及各种 CEF 套壳，都是�
 proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
 ```
 
-proxify 靠 exe 同目录的特征文件识别浏览器内核（`chrome_elf.dll`、`libcef.dll`、`resources/app.asar`、macOS 上的 `Electron Framework.framework` 等）。识别不到时加 `-g` 强制按桌面软件处理：
+proxify 靠 exe 同目录的特征文件识别浏览器内核（`chrome_elf.dll`、`libcef.dll`、`resources/app.asar`，macOS 上是 `Contents/Frameworks/*.framework` 里的 Chromium 资源文件，框架被改名也能认出）。识别不到时加 `-g` 强制按桌面软件处理：
 
 ```bat
 proxify.exe -g http://127.0.0.1:8080 "D:\path\to\App.exe"
@@ -149,11 +163,14 @@ proxify.exe -g http://127.0.0.1:8080 "D:\path\to\App.exe"
 
 > 不要对**非** Chromium 的程序用 `-g`：严格解析命令行的程序会因为不认识 `--proxy-server` 而拒绝启动。
 
-**macOS 不要用 `open -a Cursor`。** `open` 走 Launch Services，proxify 设好的环境变量和参数带不进去。必须直接启动 `.app/Contents/MacOS/` 里的那个二进制：
+**macOS 不要用 `open -a Cursor`。** `open` 走 Launch Services，proxify 设好的环境变量和参数带不进去，必须直接启动 `.app/Contents/MacOS/` 里的那个二进制。不用自己去翻 —— 把 `.app` 交给 proxify，它会从 `Info.plist` 里找到主程序：
 
 ```bash
-proxify http://127.0.0.1:8080 /Applications/Cursor.app/Contents/MacOS/Cursor
+proxify http://127.0.0.1:8080 /Applications/Cursor.app
+proxify http://127.0.0.1:8080 app:Cursor          # 同上，在 /Applications 和 ~/Applications 里按名字找
 ```
+
+`.app` 里的程序一律按图形程序处理：启动后立即返回、不占终端。想留在前台看它的日志就加 `-w`。
 
 ### 做成快捷方式
 
@@ -189,9 +206,10 @@ if errorlevel 1 pause
 
 ```bash
 #!/bin/bash
-exec /usr/local/bin/proxify -g http://127.0.0.1:8080 \
-  /Applications/Cursor.app/Contents/MacOS/Cursor
+exec /usr/local/bin/proxify http://127.0.0.1:8080 /Applications/Cursor.app
 ```
+
+ChatGPT 同理，最后一行换成 `exec /usr/local/bin/proxify http://127.0.0.1:8080 -app chatgpt`。
 
 **Linux** —— `~/.local/share/applications/cursor-proxify.desktop`：
 
@@ -274,8 +292,9 @@ proxify [options] <proxy_url> -app <name> [args...]
 |---|---|
 | `<url>` | HTTP/HTTPS 代理地址，位置参数，如 `http://127.0.0.1:8080` |
 | `-s <url>` | SOCKS 代理，如 `socks5://127.0.0.1:1080`。可与 HTTP 代理同时给 |
-| `-app <name>` | 启动内置名字对应的软件：`chatgpt`（Windows 商店包 / macOS `.app`），Windows 上 `codex` 为同义词。名字后面的参数原样传给软件。也可写 `-a`、`--app` |
+| `-app <name>` | 启动内置名字对应的软件：`chatgpt`（Windows 商店包 / macOS `.app`），`codex` 为同义词。名字后面的参数原样传给软件。也可写 `-a`、`--app` |
 | `appx:<family>` | 写在 `<command>` 的位置（Windows）：按 PackageFamilyName 启动商店 / MSIX 软件，运行时解析带版本号的 `WindowsApps` 路径 |
+| `app:<Name>`、`*.app` | 写在 `<command>` 的位置（macOS）：`app:Cursor` 在 `/Applications`、`~/Applications` 里找 `Cursor.app`；也可以直接给 `.app` 的路径。主程序取自 `Info.plist` 的 `CFBundleExecutable` |
 | `-n <hosts>` | **追加**绕过代理的主机，同时作用于 `NO_PROXY` 和 `--proxy-bypass-list`。回环地址永远包含在内 |
 | `-g`, `--gui` | 桌面模式：启动后立即返回，并强制注入浏览器内核参数 |
 | `-w`, `--wait` | 等待目标退出并转发退出码（控制台程序的默认行为） |
@@ -323,7 +342,7 @@ proxify http://proxy:8080  App.exe
 
 - **为什么关掉 QUIC 和 HTTP/2**：QUIC（HTTP/3）走 UDP，会直接绕过 HTTP CONNECT 代理；关掉 HTTP/2 让 Chromium 退回 HTTP/1.1，经 CONNECT 隧道时兼容性最好。
 - **Windows**：读 PE 头判断子系统。控制台程序等待并转发退出码；图形程序以 `DETACHED_PROCESS` 启动后立即返回，且不继承 proxify 的输出管道，所以 `proxify ... | findstr` 或在脚本里捕获输出都不会被卡住。
-- **Unix / macOS**：直接 `execvp` 替换自身，内存里不留包装进程。`-g` 时先 `fork` + `setsid()`，终端立刻归还。
+- **Unix / macOS**：直接 `execvp` 替换自身，内存里不留包装进程。`-g` 或目标在 `.app` 里时先 `fork` + `setsid()`，终端立刻归还。macOS 上用 libproc（`proc_listallpids` / `proc_pidpath`，libSystem 自带）检查目标是否已在运行。
 - **商店软件**：通过 kernel32 的 `GetPackagesByPackageFamily` / `GetPackagePathByFullName` 查安装目录，再从 `AppxManifest.xml` 取主程序。运行时动态查找这两个函数，不增加任何头文件和链接依赖。
 
 Node hook 的源码是 [`proxify-hook.js`](proxify-hook.js)，由 `_gen_hook_inc.py` 转成 C 字符串 `proxify-hook.inc` 编进可执行文件。开发时把 `proxify-hook.js` 放在 proxify 旁边，会优先使用这份外部文件，改 hook 不用重新编译。
@@ -388,6 +407,11 @@ ChatGPT / Codex 用到的：`chatgpt.com`、`*.chatgpt.com`、`*.openai.com`、`
 ---
 
 ## 更新记录
+
+**1.5.0**
+- 适配 macOS 版 ChatGPT：它已换成和 Windows 相同的 Electron 包，但内核框架改名为 `Codex Framework.framework`，旧版识别不到，没有注入 `--proxy-server`。现在按 `Contents/Frameworks/*.framework` 里的 Chromium 资源文件识别，不再依赖框架名字。
+- macOS：`<command>` 可以直接写 `.app` 路径或 `app:<Name>`，主程序从 `Info.plist` 解析；`-app chatgpt` 会同时查 `/Applications` 和 `~/Applications`，`-app codex` 在 macOS 上也可用。
+- macOS：`.app` 里的程序按图形程序处理，启动后立即返回（`-w` 改回等待）；目标已在运行时和 Windows 一样给出警告。
 
 **1.4.0**
 - 新增 `-app <name>`：`proxify http://127.0.0.1:8080 -app chatgpt` 一行启动 ChatGPT Desktop / Codex。

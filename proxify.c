@@ -6,6 +6,7 @@
  *   proxify -s <socks_url> <command> [args...]
  *   proxify -g <proxy_url> <desktop_app.exe>
  *   proxify <proxy_url> -app chatgpt
+ *   proxify <proxy_url> /Applications/Cursor.app      (macOS bundle)
  *   proxify -n <hosts> <proxy_url> <command> [args...]
  *
  * Sets: HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY (and lowercase variants).
@@ -21,6 +22,9 @@
 
 #ifndef _WIN32
   #define _POSIX_C_SOURCE 200112L
+#endif
+#ifdef __APPLE__
+  #define _DARWIN_C_SOURCE
 #endif
 
 #include <stdio.h>
@@ -38,14 +42,18 @@
   #include <limits.h>
   #include <fcntl.h>
   #include <unistd.h>
+  #include <dirent.h>
   #include <sys/stat.h>
   #include <sys/types.h>
 #ifndef PATH_MAX
   #define PATH_MAX 4096
 #endif
+#ifdef __APPLE__
+  #include <libproc.h>
+#endif
 #endif
 
-#define VERSION "1.4.0"
+#define VERSION "1.5.0"
 #define DEFAULT_NO_PROXY "localhost,127.0.0.1,::1"
 #define HOOK_MARKER "PROXIFY_NODE_HOOK"
 
@@ -395,8 +403,13 @@ static int resolve_exe(const char *cmd, char *out, size_t n)
 
 static int is_gui_exe(const char *path)
 {
+#ifdef __APPLE__
+    /* The main binary of a .app bundle is a GUI program. */
+    return strstr(path, ".app/Contents/MacOS/") != NULL;
+#else
     (void)path;
     return 0;
+#endif
 }
 #endif
 
@@ -462,6 +475,88 @@ static int resolve_appx(const char *family, char *out, size_t n)
 }
 #endif
 
+#ifdef __APPLE__
+/* "Foo.app" -> "Foo.app/Contents/MacOS/<CFBundleExecutable>". Launching through
+ * `open` would drop our environment and flags, so the main binary is needed. */
+static int resolve_bundle(const char *bundle, char *out, size_t n)
+{
+    char base[PATH_MAX], plist[PATH_MAX], rel[PATH_MAX];
+    char *xml;
+    const char *p, *q, *name;
+    struct stat st;
+    size_t len = strlen(bundle), got;
+    int ok = 0;
+    FILE *f;
+
+    while (len > 1 && bundle[len - 1] == '/')
+        len--;
+    if (len < 5 || len >= sizeof(base) || strncmp(bundle + len - 4, ".app", 4) != 0)
+        return 0;
+    memcpy(base, bundle, len);
+    base[len] = '\0';
+    if (stat(base, &st) != 0 || !S_ISDIR(st.st_mode))
+        return 0;
+
+    if (path_join(plist, sizeof(plist), base, "Contents/Info.plist") &&
+        stat(plist, &st) == 0 && st.st_size > 0 && st.st_size < (1 << 22) &&
+        (f = fopen(plist, "rb")) != NULL) {
+        xml = (char *)malloc((size_t)st.st_size + 1);
+        got = xml ? fread(xml, 1, (size_t)st.st_size, f) : 0;
+        fclose(f);
+        if (xml) {
+            xml[got] = '\0';
+            p = strstr(xml, "<key>CFBundleExecutable</key>");
+            if (p)
+                p = strstr(p, "<string>");
+            q = p ? strstr(p, "</string>") : NULL;
+            ok = q && snprintf(rel, sizeof(rel), "Contents/MacOS/%.*s",
+                               (int)(q - (p + 8)), p + 8) < (int)sizeof(rel) &&
+                 path_join(out, n, base, rel) && file_exists(out);
+            free(xml);
+            if (ok)
+                return 1;
+        }
+    }
+    /* Binary plist or no key: the executable is usually named after the bundle. */
+    name = base;
+    for (p = base; *p; p++) {
+        if (*p == '/')
+            name = p + 1;
+    }
+    if (snprintf(rel, sizeof(rel), "Contents/MacOS/%.*s",
+                 (int)(strlen(name) - 4), name) >= (int)sizeof(rel))
+        return 0;
+    return path_join(out, n, base, rel) && file_exists(out);
+}
+
+/* "app:ChatGPT|Codex" -> first of those bundles found in /Applications or
+ * ~/Applications. */
+static int resolve_app_name(const char *names, char *out, size_t n)
+{
+    const char *home = getenv("HOME");
+    const char *p = names;
+
+    while (*p) {
+        const char *bar = strchr(p, '|');
+        int len = bar ? (int)(bar - p) : (int)strlen(p);
+        char bundle[PATH_MAX];
+
+        if (len > 0) {
+            if (snprintf(bundle, sizeof(bundle), "/Applications/%.*s.app", len, p) <
+                    (int)sizeof(bundle) && resolve_bundle(bundle, out, n))
+                return 1;
+            if (home && snprintf(bundle, sizeof(bundle), "%s/Applications/%.*s.app",
+                                 home, len, p) < (int)sizeof(bundle) &&
+                resolve_bundle(bundle, out, n))
+                return 1;
+        }
+        if (!bar) break;
+        p = bar + 1;
+    }
+    return 0;
+}
+#endif
+
 static int is_chromium_app(const char *exe)
 {
     char dir[EXE_PATH_MAX], cand[EXE_PATH_MAX];
@@ -509,6 +604,29 @@ static int is_chromium_app(const char *exe)
             if (path_join(fw, sizeof(fw), contents, "Frameworks/Chromium Embedded Framework.framework") &&
                 file_exists(fw))
                 return 1;
+            if (path_join(fw, sizeof(fw), contents, "Resources/app.asar") &&
+                file_exists(fw))
+                return 1;
+            /* Apps rename the framework ("Codex Framework.framework" in
+             * ChatGPT), so look for Chromium's resources inside any of them. */
+            if (path_join(fw, sizeof(fw), contents, "Frameworks")) {
+                DIR *d = opendir(fw);
+                struct dirent *e;
+                int found = 0;
+
+                while (d && !found && (e = readdir(d)) != NULL) {
+                    size_t len = strlen(e->d_name);
+                    if (len <= 10 || strcmp(e->d_name + len - 10, ".framework") != 0)
+                        continue;
+                    if (snprintf(cand, sizeof(cand), "%s/%s/Resources/chrome_100_percent.pak",
+                                 fw, e->d_name) < (int)sizeof(cand) && file_exists(cand))
+                        found = 1;
+                }
+                if (d)
+                    closedir(d);
+                if (found)
+                    return 1;
+            }
         }
     }
 #endif
@@ -539,6 +657,7 @@ static int is_vscode_family(const char *exe)
     return 0;
 }
 
+#if defined(_WIN32) || defined(__APPLE__)
 static const char *path_basename(const char *path)
 {
     const char *base = path, *p;
@@ -549,6 +668,7 @@ static const char *path_basename(const char *path)
     }
     return base;
 }
+#endif
 
 #ifdef _WIN32
 static DWORD find_running_exe(const char *exe)
@@ -585,6 +705,23 @@ static DWORD find_running_exe(const char *exe)
     } while (Process32Next(snap, &pe));
     CloseHandle(snap);
     return found;
+}
+#elif defined(__APPLE__)
+static pid_t find_running_exe(const char *exe)
+{
+    static pid_t pids[8192];
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    pid_t self = getpid();
+    int n, i;
+
+    n = proc_listallpids(pids, (int)sizeof(pids));
+    for (i = 0; i < n; i++) {
+        if (pids[i] <= 0 || pids[i] == self)
+            continue;
+        if (proc_pidpath(pids[i], path, sizeof(path)) > 0 && strcmp(path, exe) == 0)
+            return pids[i];
+    }
+    return 0;
 }
 #endif
 
@@ -929,7 +1066,10 @@ static const struct { const char *name; const char *target; } kApps[] = {
     { "chatgpt", "appx:OpenAI.Codex_2p2nqsd0c76g0" },
     { "codex",   "appx:OpenAI.Codex_2p2nqsd0c76g0" },
 #elif defined(__APPLE__)
-    { "chatgpt", "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" },
+    /* Same Electron package as on Windows (com.openai.codex); older installs
+     * carry it as Codex.app. */
+    { "chatgpt", "app:ChatGPT|Codex" },
+    { "codex",   "app:Codex|ChatGPT" },
 #endif
     { NULL, NULL }
 };
@@ -957,6 +1097,7 @@ static int has_flag_prefix(int argc, char **argv, int start, const char *prefix)
     return 0;
 }
 
+#ifdef _WIN32
 static int append_arg(char *cmdline, size_t cap, const char *arg)
 {
     size_t used = strlen(cmdline);
@@ -974,6 +1115,7 @@ static int append_arg(char *cmdline, size_t cap, const char *arg)
         strcat(cmdline, "\"");
     return 0;
 }
+#endif
 
 static void usage(void)
 {
@@ -998,7 +1140,9 @@ static void usage(void)
         "  Cursor / VS Code: also injects a Node hook so Agent HTTP/2 uses CONNECT.\n"
         "  Fully Quit the app first (single-instance otherwise ignores new flags).\n"
         "  Windows Store apps: use appx:<PackageFamilyName> as the command, e.g.\n"
-        "  appx:OpenAI.Codex_2p2nqsd0c76g0 (ChatGPT). Survives app updates.\n\n"
+        "  appx:OpenAI.Codex_2p2nqsd0c76g0 (ChatGPT). Survives app updates.\n"
+        "  macOS: the command may be a bundle (/Applications/Cursor.app) or\n"
+        "  app:<Name> (app:Cursor). Never `open -a`: it drops env and flags.\n\n"
         "Examples:\n"
         "  proxify http://127.0.0.1:8080 curl https://example.com\n"
         "  proxify -n \"10.0.0.0/8,.corp.local\" http://127.0.0.1:8080 app.exe\n"
@@ -1025,6 +1169,7 @@ int main(int argc, char *argv[])
     int inject_argv = 0;
     int detach = 0;
     int resolved_ok = 0;
+    int from_app = 0;
     char resolved[EXE_PATH_MAX];
     char workdir[EXE_PATH_MAX];
     char no_proxy[2048];
@@ -1067,6 +1212,7 @@ int main(int argc, char *argv[])
             }
             /* The name becomes the command; anything after it goes to the app. */
             argv[i] = (char *)target;
+            from_app = 1;
             cmd_start = i;
             break;
         } else if (strcmp(argv[i], "-n") == 0) {
@@ -1118,6 +1264,20 @@ int main(int argc, char *argv[])
             return 127;
         }
         argv[cmd_start] = appx_exe;
+    }
+#elif defined(__APPLE__)
+    {
+        static char bundle_exe[PATH_MAX];
+        if (strncmp(argv[cmd_start], "app:", 4) == 0) {
+            if (!resolve_app_name(argv[cmd_start] + 4, bundle_exe, sizeof(bundle_exe))) {
+                fprintf(stderr, "proxify: app '%s' not found in /Applications "
+                        "or ~/Applications\n", argv[cmd_start] + 4);
+                return 127;
+            }
+            argv[cmd_start] = bundle_exe;
+        } else if (resolve_bundle(argv[cmd_start], bundle_exe, sizeof(bundle_exe))) {
+            argv[cmd_start] = bundle_exe;
+        }
     }
 #endif
 
@@ -1189,18 +1349,36 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[proxify] exec: %s\n", argv[cmd_start]);
     }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     if (resolved_ok && (is_gui || is_chrome || is_vscode)) {
-        DWORD running = find_running_exe(resolved);
+        unsigned long running = (unsigned long)find_running_exe(resolved);
         if (running) {
             fprintf(stderr,
                 "[proxify] WARNING: %s is already running (pid %lu).\n"
-                "[proxify] Electron/VS Code reuse the first instance and ignore new proxy flags.\n"
+                "[proxify] Electron/VS Code reuse the first instance and ignore new proxy flags.\n",
+                path_basename(resolved), running);
+#ifdef _WIN32
+            fprintf(stderr,
                 "[proxify] Fully Quit from the tray, or: taskkill /F /IM %s\n",
-                path_basename(resolved), (unsigned long)running,
                 path_basename(resolved));
+#else
+            fprintf(stderr,
+                "[proxify] Fully Quit it first (Cmd+Q; closing the window is not enough),\n"
+                "[proxify] or: kill %lu\n", running);
+#endif
         }
     }
+#endif
+#ifdef __APPLE__
+    if (from_app && resolved_ok && !is_chrome) {
+        fprintf(stderr,
+            "[proxify] note: %s is not the Electron build (old native ChatGPT?).\n"
+            "[proxify]       Native macOS apps follow the system proxy and ignore these\n"
+            "[proxify]       settings. Update ChatGPT to the current version.\n",
+            resolved);
+    }
+#else
+    (void)from_app;
 #endif
     if (is_vscode && no_hook) {
         fprintf(stderr,

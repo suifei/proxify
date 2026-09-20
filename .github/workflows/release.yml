@@ -111,6 +111,7 @@ jobs:
             ```
             proxify http://127.0.0.1:8080 -app chatgpt
             proxify http://127.0.0.1:8080 "D:\cursor\Cursor.exe"
+            proxify http://127.0.0.1:8080 /Applications/Cursor.app
             ```
 
             本版改动见 [更新记录](https://github.com/suifei/proxify#更新记录)，完整用法见 [README](https://github.com/suifei/proxify#readme)。
