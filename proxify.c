@@ -5,6 +5,7 @@
  *   proxify <proxy_url> <command> [args...]
  *   proxify -s <socks_url> <command> [args...]
  *   proxify -g <proxy_url> <desktop_app.exe>
+ *   proxify <proxy_url> -app chatgpt
  *   proxify -n <hosts> <proxy_url> <command> [args...]
  *
  * Sets: HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY (and lowercase variants).
@@ -35,6 +36,7 @@
   #include <tlhelp32.h>
 #else
   #include <limits.h>
+  #include <fcntl.h>
   #include <unistd.h>
   #include <sys/stat.h>
   #include <sys/types.h>
@@ -43,7 +45,7 @@
 #endif
 #endif
 
-#define VERSION "1.3.0"
+#define VERSION "1.4.0"
 #define DEFAULT_NO_PROXY "localhost,127.0.0.1,::1"
 #define HOOK_MARKER "PROXIFY_NODE_HOOK"
 
@@ -395,6 +397,68 @@ static int is_gui_exe(const char *path)
 {
     (void)path;
     return 0;
+}
+#endif
+
+#ifdef _WIN32
+/* Store (MSIX) apps live in a versioned WindowsApps folder that changes on
+ * every update. "appx:<PackageFamilyName>" resolves the current install dir and
+ * the main executable from AppxManifest.xml. The kernel32 exports are looked up
+ * at run time so old SDKs / TCC still build. */
+typedef LONG (WINAPI *pkgs_by_family_fn)(PCWSTR, UINT32 *, PWSTR *, UINT32 *, WCHAR *);
+typedef LONG (WINAPI *pkg_path_fn)(PCWSTR, UINT32 *, PWSTR);
+
+static int resolve_appx(const char *family, char *out, size_t n)
+{
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    pkgs_by_family_fn get_pkgs;
+    pkg_path_fn get_path;
+    WCHAR wfamily[256], names[2048], wroot[MAX_PATH];
+    PWSTR full[16];
+    UINT32 count = 16, len = 2048, plen = MAX_PATH;
+    char root[MAX_PATH], manifest[MAX_PATH], rel[MAX_PATH], xml[65536];
+    const char *p, *q;
+    FILE *f;
+    size_t got, i;
+
+    if (!k32)
+        return 0;
+    get_pkgs = (pkgs_by_family_fn)(void (*)(void))
+        GetProcAddress(k32, "GetPackagesByPackageFamily");
+    get_path = (pkg_path_fn)(void (*)(void))
+        GetProcAddress(k32, "GetPackagePathByFullName");
+    if (!get_pkgs || !get_path)
+        return 0;
+    if (!MultiByteToWideChar(CP_ACP, 0, family, -1, wfamily, 256))
+        return 0;
+    if (get_pkgs(wfamily, &count, full, &len, names) != ERROR_SUCCESS || count == 0)
+        return 0;
+    if (get_path(full[0], &plen, wroot) != ERROR_SUCCESS)
+        return 0;
+    if (!WideCharToMultiByte(CP_ACP, 0, wroot, -1, root, sizeof(root), NULL, NULL))
+        return 0;
+    if (!path_join(manifest, sizeof(manifest), root, "AppxManifest.xml"))
+        return 0;
+
+    f = fopen(manifest, "rb");
+    if (!f)
+        return 0;
+    got = fread(xml, 1, sizeof(xml) - 1, f);
+    fclose(f);
+    xml[got] = '\0';
+    p = strstr(xml, "<Application ");
+    if (p)
+        p = strstr(p, "Executable=\"");
+    if (!p)
+        return 0;
+    p += 12;
+    q = strchr(p, '"');
+    if (!q || (size_t)(q - p) >= sizeof(rel))
+        return 0;
+    for (i = 0; p + i < q; i++)
+        rel[i] = (p[i] == '/') ? '\\' : p[i];
+    rel[i] = '\0';
+    return path_join(out, n, root, rel) && file_exists(out);
 }
 #endif
 
@@ -859,6 +923,28 @@ static int inject_vscode_node_hook(const char *exe, const char *argv0, int verbo
     return patched;
 }
 
+/* -app <name>: short names for apps whose real target nobody can remember. */
+static const struct { const char *name; const char *target; } kApps[] = {
+#ifdef _WIN32
+    { "chatgpt", "appx:OpenAI.Codex_2p2nqsd0c76g0" },
+    { "codex",   "appx:OpenAI.Codex_2p2nqsd0c76g0" },
+#elif defined(__APPLE__)
+    { "chatgpt", "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" },
+#endif
+    { NULL, NULL }
+};
+
+static const char *app_target(const char *name)
+{
+    int i;
+
+    for (i = 0; kApps[i].name; i++) {
+        if (token_eq(name, strlen(name), kApps[i].name, strlen(kApps[i].name)))
+            return kApps[i].target;
+    }
+    return NULL;
+}
+
 static int has_flag_prefix(int argc, char **argv, int start, const char *prefix)
 {
     int i;
@@ -897,6 +983,7 @@ static void usage(void)
         "Options:\n"
         "  <url>           HTTP/HTTPS proxy (positional, before -s or command)\n"
         "  -s <url>        SOCKS proxy\n"
+        "  -app <name>     Launch a known app instead of <command>: chatgpt, codex\n"
         "  -n <hosts>      Extra bypass hosts (loopback is always included:\n"
         "                  " DEFAULT_NO_PROXY ")\n"
         "  -g, --gui       Desktop mode: detach and inject browser proxy flags\n"
@@ -909,11 +996,14 @@ static void usage(void)
         "  Detected automatically. Env vars alone are not enough on Windows;\n"
         "  proxify also passes --proxy-server, --proxy-bypass-list, --disable-quic, --disable-http2.\n"
         "  Cursor / VS Code: also injects a Node hook so Agent HTTP/2 uses CONNECT.\n"
-        "  Fully Quit the app first (single-instance otherwise ignores new flags).\n\n"
+        "  Fully Quit the app first (single-instance otherwise ignores new flags).\n"
+        "  Windows Store apps: use appx:<PackageFamilyName> as the command, e.g.\n"
+        "  appx:OpenAI.Codex_2p2nqsd0c76g0 (ChatGPT). Survives app updates.\n\n"
         "Examples:\n"
         "  proxify http://127.0.0.1:8080 curl https://example.com\n"
         "  proxify -n \"10.0.0.0/8,.corp.local\" http://127.0.0.1:8080 app.exe\n"
-        "  proxify -g http://127.0.0.1:8081 Antigravity.exe\n");
+        "  proxify -g http://127.0.0.1:8081 Antigravity.exe\n"
+        "  proxify http://127.0.0.1:8080 -app chatgpt\n");
 }
 
 int main(int argc, char *argv[])
@@ -962,6 +1052,23 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "-s") == 0) {
             if (++i >= argc) { fprintf(stderr, "proxify: -s requires an argument\n"); return 1; }
             socks_proxy = argv[i];
+        } else if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "-app") == 0 ||
+                   strcmp(argv[i], "--app") == 0) {
+            const char *target;
+            int k;
+            if (++i >= argc) { fprintf(stderr, "proxify: -app requires a name\n"); return 1; }
+            target = app_target(argv[i]);
+            if (!target) {
+                fprintf(stderr, "proxify: unknown app '%s'. Known:", argv[i]);
+                for (k = 0; kApps[k].name; k++)
+                    fprintf(stderr, " %s", kApps[k].name);
+                fprintf(stderr, "\n");
+                return 1;
+            }
+            /* The name becomes the command; anything after it goes to the app. */
+            argv[i] = (char *)target;
+            cmd_start = i;
+            break;
         } else if (strcmp(argv[i], "-n") == 0) {
             if (++i >= argc) { fprintf(stderr, "proxify: -n requires an argument\n"); return 1; }
             no_proxy_opt = argv[i];
@@ -1000,6 +1107,19 @@ int main(int argc, char *argv[])
 
     set_proxy_env(http_proxy, socks_proxy, no_proxy);
     set_browser_proxy_env(proxy_server, bypass);
+
+#ifdef _WIN32
+    if (strncmp(argv[cmd_start], "appx:", 5) == 0) {
+        static char appx_exe[MAX_PATH];
+        if (!resolve_appx(argv[cmd_start] + 5, appx_exe, sizeof(appx_exe))) {
+            fprintf(stderr, "proxify: Store package '%s' not found "
+                    "(PowerShell: Get-AppxPackage | select PackageFamilyName)\n",
+                    argv[cmd_start] + 5);
+            return 127;
+        }
+        argv[cmd_start] = appx_exe;
+    }
+#endif
 
     resolved[0] = '\0';
     workdir[0] = '\0';
@@ -1127,7 +1247,9 @@ int main(int argc, char *argv[])
         if (detach)
             flags |= DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
 
-        if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
+        /* A detached app must not inherit our stdout/stderr: it would hold the
+         * pipe open and hang callers such as "proxify ... | findstr". */
+        if (!CreateProcessA(NULL, cmdline, NULL, NULL, detach ? FALSE : TRUE,
                             flags, NULL,
                             workdir[0] ? workdir : NULL, &si, &pi)) {
             fprintf(stderr, "proxify: failed to launch '%s' (error %lu)\n",
@@ -1187,6 +1309,17 @@ int main(int argc, char *argv[])
             if (pid > 0)
                 return 0;
             setsid();
+            /* Same reason as on Windows: do not keep the caller's pipe open. */
+            {
+                int fd = open("/dev/null", O_RDWR);
+                if (fd >= 0) {
+                    dup2(fd, 0);
+                    dup2(fd, 1);
+                    dup2(fd, 2);
+                    if (fd > 2)
+                        close(fd);
+                }
+            }
         }
 
         execvp(newargv[0], newargv);

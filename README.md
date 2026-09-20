@@ -1,99 +1,171 @@
 # proxify
 
-> 给任意进程挂上代理。环境变量和浏览器内核参数会传给子进程、孙进程，**不用改 Windows / macOS 系统全局代理**。
+> 给**任意一个程序**挂上代理，连同它的子进程、孙进程一起 —— **不碰 Windows / macOS 的系统全局代理**。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/suifei/proxify/releases/tag/v1.3.0)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
+[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](https://github.com/suifei/proxify/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#安装)
 [![Build](https://github.com/suifei/proxify/actions/workflows/release.yml/badge.svg)](https://github.com/suifei/proxify/actions/workflows/release.yml)
 
-命令行工具（curl、git、Python、Go、Node）认 `HTTP_PROXY`；Cursor、ChatGPT Desktop、VS Code、Antigravity 这类 **Electron / Chromium 桌面软件在 Windows 上不认环境变量**，要靠启动参数 `--proxy-server`。proxify 两种都会设，本机回环默认绕过。
+```bash
+proxify http://127.0.0.1:8080 -app chatgpt                 # ChatGPT Desktop / Codex
+proxify http://127.0.0.1:8080 "D:\cursor\Cursor.exe"       # Cursor、VS Code 等桌面软件
+proxify http://127.0.0.1:8080 git clone https://github.com/suifei/proxify
+```
+
+一个单文件 C 程序，零依赖，用法和 `nice` / `nohup` 一样：**先写代理，再写要启动的程序**。
 
 ---
 
-## 中文简介
+## 目录
 
-`proxify` 是一个很小的启动器，用法类似 `nice` / `nohup`：先写代理，再写你要打开的程序。它只影响**这一棵进程树**，不会把系统「设置 → 网络和 Internet → 代理」打开。改系统代理会让浏览器、更新、网盘全部走代理，所以不要用那条路。
-
-适合：
-
-- 终端里的 curl / git / npm
-- Cursor、ChatGPT Desktop、VS Code、Windsurf、Trae、Antigravity 等套了浏览器内核的桌面客户端
-- 不想给整个操作系统开全局代理，只想给某一个 App 出口
+- [为什么需要它](#为什么需要它)
+- [安装](#安装)
+- [桌面软件指南](#桌面软件指南)：[ChatGPT](#chatgpt-desktop--codex) · [Cursor / VS Code](#cursor--vs-code) · [其他 Electron 软件](#其他-electron--chromium-软件) · [做成快捷方式](#做成快捷方式)
+- [确认真的走了代理](#确认真的走了代理)
+- [常见问题](#常见问题)
+- [命令参考](#命令参考)
+- [工作原理](#工作原理)
+- [编译](#编译)
+- [推荐走代理的域名](#推荐走代理的域名)
+- [更新记录](#更新记录)
 
 ---
 
-## 给 Cursor、ChatGPT Desktop 这类软件挂代理
+## 为什么需要它
 
-下面以本地 HTTP 代理 `http://127.0.0.1:8080` 为例。Clash / Clash Verge / mihomo 默认混合端口经常是 **7890**，v2rayN 常见 **10808 / 10809**，请改成你自己软件里显示的本地端口。
+给单个软件挂代理，常见的两条路都有坑：
 
-### 0. 先装 proxify
+- **开系统全局代理**：浏览器、系统更新、网盘全都跟着走代理。而且不能「开一下等软件起来再关」—— Chromium 会监视系统代理设置，你一关它就直连了。
+- **只设 `HTTP_PROXY` 环境变量**：命令行工具认，但桌面软件大多不认。
 
-到 [Releases](https://github.com/suifei/proxify/releases) 下载对应平台的文件，改个短名字放到 PATH 里。
-
-| 你的系统 | 下载 | 放到哪里 |
+| 软件类型 | 认 `HTTP_PROXY` 吗 | 真正管用的 |
 |---|---|---|
-| Windows x64 | `proxify-windows-amd64.exe` | 改名为 `proxify.exe`，放到 `C:\tools\` 或任意已在 PATH 的目录 |
+| curl / git / npm / Python / Go | 认 | 环境变量 |
+| Electron / Chromium / CEF（Cursor、VS Code、ChatGPT、Antigravity…） | Windows 上基本不认 | 启动参数 `--proxy-server` |
+| 上述软件里的 Node 进程（Cursor Agent 的 HTTP/2） | 不认，也不吃启动参数 | 往 Node 入口注入 hook |
+| WebView2 套壳 | 不认 | `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` |
+| Qt WebEngine | 通常不认 | `QTWEBENGINE_CHROMIUM_FLAGS` |
+
+proxify 把这几层**一次全做了**，并且只影响它启动的这一棵进程树。本机回环（`localhost` / `127.0.0.1` / `::1`）默认绕过。
+
+---
+
+## 安装
+
+到 [Releases](https://github.com/suifei/proxify/releases/latest) 下载对应平台的文件，改成短名字放进 PATH。
+
+| 系统 | 下载 | 放到哪里 |
+|---|---|---|
+| Windows x64 | `proxify-windows-amd64.exe` | 改名 `proxify.exe`，放到 `C:\tools\` 或任意 PATH 目录 |
 | macOS Apple Silicon | `proxify-darwin-arm64` | `chmod +x` 后拷到 `/usr/local/bin/proxify` |
 | macOS Intel | `proxify-darwin-amd64` | 同上 |
-| Linux x64 | `proxify-linux-amd64` | `chmod +x` 后拷到 `/usr/local/bin/proxify` |
+| Linux x64 | `proxify-linux-amd64` | 同上 |
 | Linux ARM64 | `proxify-linux-arm64` | 同上 |
 
-macOS 第一次运行若提示「无法验证开发者」：
+macOS 首次运行若提示「无法验证开发者」：
 
 ```bash
 xattr -d com.apple.quarantine proxify
 ```
 
-### 1. 必须先彻底退出原软件
+下文都以本地 HTTP 代理 `http://127.0.0.1:8080` 为例。Clash / mihomo 的混合端口通常是 **7890**，v2rayN 常见 **10808 / 10809**，请换成你自己代理软件里显示的端口。
 
-Cursor、ChatGPT 关掉窗口后经常还在托盘里活着。托盘图标右键 **Quit / 退出**，或在任务管理器里把残留进程结束掉。否则你用 proxify 再开一次，连上的还是没挂代理的那份。
+---
 
-### 2. 找到真正的可执行文件
+## 桌面软件指南
 
-不要用开始菜单里那个「快捷方式自己猜」的方式。在任务管理器里对正在运行的 Cursor / ChatGPT 选「打开文件所在的位置」，复制那个 `.exe` / 二进制的完整路径。
+> **第一步永远是：彻底退出原软件。**
+> Cursor、ChatGPT 关掉窗口后通常还活在托盘里。Electron 是单实例的，你再开一次只会唤醒旧的那份，新参数会被直接丢掉。请在托盘图标上右键 **Quit / 退出**，或者 `taskkill /F /IM Cursor.exe`。proxify 发现目标已在运行时会打印警告。
 
-常见位置（版本不同可能略有出入）：
+### ChatGPT Desktop / Codex
 
-| 软件 | Windows | macOS |
-|---|---|---|
-| Cursor | `%LOCALAPPDATA%\Programs\cursor\Cursor.exe` | `/Applications/Cursor.app/Contents/MacOS/Cursor` |
-| ChatGPT Desktop | `%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe` | `/Applications/ChatGPT.app/Contents/MacOS/ChatGPT` |
-| VS Code | `%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe` | `/Applications/Visual Studio Code.app/Contents/MacOS/Electron` |
-| Antigravity | 安装目录下的 `Antigravity.exe` | `Antigravity.app/Contents/MacOS/` 里的主程序 |
+```bat
+proxify.exe http://127.0.0.1:8080 -app chatgpt
+```
 
-macOS **不要**用 `open -a Cursor`：`open` 会走 Launch Services，proxify 设好的环境和参数带不进去。必须直接启动 `.app/Contents/MacOS/` 里面那个二进制。
+就这一行。`-app codex` 是同一个东西 —— Windows 上 ChatGPT 和 Codex 现在是同一个商店包。
 
-Microsoft Store 版 ChatGPT 路径在 `WindowsApps` 里，比较别扭。能装独立安装包的话更省事。
+为什么要内置名字：ChatGPT 是 Windows 商店（MSIX）软件，装在 `C:\Program Files\WindowsApps\OpenAI.Codex_<版本号>_x64__...\` 下面，**每次自动更新路径都会变**，写死在快捷方式里过几天就失效。`-app chatgpt` 会在启动时查出当前的安装目录和主程序。
 
-### 3. Windows：一条命令，或做一个启动脚本
+它内部是 Chromium 内核加一个 Rust 写的 `codex.exe` 子进程：前者吃 `--proxy-server`，后者认 `HTTPS_PROXY`，proxify 两样都给了，**不需要改它的任何文件**。实测界面、登录、对话、Agent 的连接全部走代理。
 
-先在命令行试一次（把端口和路径换成你的）：
+macOS 上 `-app chatgpt` 指向 `/Applications/ChatGPT.app/Contents/MacOS/ChatGPT`。
+
+**其他商店软件**没有内置名字时，用通用写法 `appx:<PackageFamilyName>`：
+
+```bat
+proxify.exe http://127.0.0.1:8080 appx:OpenAI.Codex_2p2nqsd0c76g0
+```
+
+```powershell
+# 查 PackageFamilyName
+Get-AppxPackage *关键字* | select Name, PackageFamilyName
+```
+
+### Cursor / VS Code
 
 ```bat
 proxify.exe -v http://127.0.0.1:8080 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
 ```
 
+路径不确定的话：让软件先正常跑起来，在任务管理器里右键 →「打开文件所在的位置」，复制那个 `.exe` 的完整路径。
+
+| 软件 | Windows 默认位置 | macOS |
+|---|---|---|
+| Cursor | `%LOCALAPPDATA%\Programs\cursor\Cursor.exe` | `/Applications/Cursor.app/Contents/MacOS/Cursor` |
+| VS Code | `%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe` | `/Applications/Visual Studio Code.app/Contents/MacOS/Electron` |
+
+**Cursor 多出来的一层。** `--proxy-server` 只管 Chromium 窗口；Cursor 的 Agent 和模型列表走的是 **Node.js 的 HTTP/2**，既不吃启动参数也不认 `HTTP_PROXY`。所以 proxify 识别到 Cursor / VS Code 家族（`resources/app/product.json`）时会额外做一件事：
+
+1. 把一个 Node hook 写到安装目录的 `resources/app/out/proxify-hook.cjs`；
+2. 在 `resources/app/out/bootstrap-fork.js` 开头加一行加载它。
+
+这个 hook 把 `http` / `https` / `http2.connect` 改成经 HTTP CONNECT（或 SOCKS5）隧道出去，并让 fork 出来的子进程也带上它。只改这一个入口文件 —— Cursor 会校验自带扩展的文件哈希，动那些文件会让它的连接层罢工。不经 proxify 启动时没有代理环境变量，hook 不改变任何网络行为。
+
+启动时看到下面这行就说明注入成功：
+
+```
+[proxify] patched Node entry ...\resources\app\out\bootstrap-fork.js
+```
+
+- Cursor 自动更新会把这个文件覆盖回去，**再用 proxify 启动一次就会重新注入**。
+- 不想让 proxify 改文件就加 `--no-hook`。这时需要自己在 Cursor 的 settings.json 里写 `"http.proxy"` 和 `"cursor.general.disableHttp2": true`，Agent 才会走代理。
+- 调试日志在系统临时目录的 `proxify-hook.log`。
+
+### 其他 Electron / Chromium 软件
+
+Antigravity、Windsurf、Trae、Chrome、Edge 以及各种 CEF 套壳，都是同一个用法：
+
 ```bat
-proxify.exe -v http://127.0.0.1:8080 "%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe"
+proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
 ```
 
-`-v` 会在启动前打印实际生效的代理。看到类似下面这样就对了：
-
-```
-[proxify] HTTP_PROXY  = http://127.0.0.1:8080
-[proxify] desktop    = gui, chromium-kernel
-[proxify] detach     = yes
-[proxify] inject     = --proxy-server=http://127.0.0.1:8080 --proxy-bypass-list=localhost;127.0.0.1;::1 --disable-quic
-```
-
-`chromium-kernel` 表示识别到了 Electron，已经自动加上浏览器内核要的参数（含 `--disable-quic`，避免 HTTP/3 绕过 CONNECT 代理）。如果没有识别到，加上 `-g` 强制按桌面软件处理：
+proxify 靠 exe 同目录的特征文件识别浏览器内核（`chrome_elf.dll`、`libcef.dll`、`resources/app.asar`、macOS 上的 `Electron Framework.framework` 等）。识别不到时加 `-g` 强制按桌面软件处理：
 
 ```bat
-proxify.exe -g http://127.0.0.1:8080 "D:\path\to\ChatGPT.exe"
+proxify.exe -g http://127.0.0.1:8080 "D:\path\to\App.exe"
 ```
 
-日常用的话，在桌面建一个 `Cursor-代理.bat`：
+> 不要对**非** Chromium 的程序用 `-g`：严格解析命令行的程序会因为不认识 `--proxy-server` 而拒绝启动。
+
+**macOS 不要用 `open -a Cursor`。** `open` 走 Launch Services，proxify 设好的环境变量和参数带不进去。必须直接启动 `.app/Contents/MacOS/` 里的那个二进制：
+
+```bash
+proxify http://127.0.0.1:8080 /Applications/Cursor.app/Contents/MacOS/Cursor
+```
+
+### 做成快捷方式
+
+**Windows** —— 桌面上建一个 `ChatGPT-代理.bat`：
+
+```bat
+@echo off
+proxify.exe http://127.0.0.1:8080 -app chatgpt
+if errorlevel 1 pause
+```
+
+Cursor 这类有固定路径的：
 
 ```bat
 @echo off
@@ -110,33 +182,10 @@ proxify.exe %PROXY% "%APP%"
 if errorlevel 1 pause
 ```
 
-ChatGPT Desktop 同理，把 `APP=` 换成 ChatGPT 的 exe。
+图形程序启动后 proxify 立刻返回，黑框一闪就没。想连闪都不要：给 bat 建个快捷方式，属性里「运行」选「最小化」；或者快捷方式的目标直接写
+`C:\tools\proxify.exe http://127.0.0.1:8080 -app chatgpt`。以后点这个快捷方式，别点官方原来那个。
 
-不想弹黑框：把 bat 发给自己做一个快捷方式，快捷方式属性里选「运行 → 最小化」。或者快捷方式目标直接写成：
-
-```
-C:\tools\proxify.exe http://127.0.0.1:8080 C:\Users\你的用户名\AppData\Local\Programs\cursor\Cursor.exe
-```
-
-「起始位置」填 Cursor 的安装目录。以后点这个快捷方式，不要点官方原来那个。
-
-SOCKS 代理用 `-s`：
-
-```bat
-proxify.exe -s socks5://127.0.0.1:7891 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
-```
-
-### 4. macOS：启动 .app 里面的二进制
-
-```bash
-proxify -v http://127.0.0.1:8080 /Applications/Cursor.app/Contents/MacOS/Cursor
-```
-
-```bash
-proxify -v http://127.0.0.1:8080 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
-```
-
-想从 Dock / 访达双击启动，存成 `~/bin/cursor-proxy.command`（用文本编辑即可）：
+**macOS** —— 存成 `~/bin/cursor-proxy.command`，`chmod +x` 后双击（首次被拦截就右键 → 打开）：
 
 ```bash
 #!/bin/bash
@@ -144,21 +193,7 @@ exec /usr/local/bin/proxify -g http://127.0.0.1:8080 \
   /Applications/Cursor.app/Contents/MacOS/Cursor
 ```
 
-然后：
-
-```bash
-chmod +x ~/bin/cursor-proxy.command
-```
-
-双击这个 `.command` 即可。第一次若被拦截，右键 → 打开。
-
-### 5. Linux
-
-```bash
-proxify -v http://127.0.0.1:8080 /usr/share/cursor/cursor
-```
-
-桌面项 `~/.local/share/applications/cursor-proxify.desktop`：
+**Linux** —— `~/.local/share/applications/cursor-proxify.desktop`：
 
 ```ini
 [Desktop Entry]
@@ -169,240 +204,163 @@ Type=Application
 Icon=cursor
 ```
 
-### 6. 怎么确认真的走了代理
+---
 
-1. 启动时加 `-v`，确认打印了 `HTTP_PROXY` 和 `--proxy-server`。
-2. 打开你的 Clash / v2rayN / xray 连接日志，用 Cursor 聊天或 ChatGPT 发一条消息，日志里应出现对应连接。
-3. 不要去系统设置里开「使用代理服务器」。那是全局的，和 proxify 无关。
+## 确认真的走了代理
 
-### 6.1 Cursor 启动了，代理里却没有流量
+1. 加 `-v` 启动，核对打印出来的内容：
 
-`--proxy-server` 只覆盖 Chromium 窗口。Cursor 的 Agent / 模型列表是 **Node.js HTTP/2**，会绕过启动参数和 `HTTP_PROXY`。
+   ```
+   [proxify] HTTP_PROXY  = http://127.0.0.1:8080
+   [proxify] target     = C:\Program Files\WindowsApps\OpenAI.Codex_...\app\ChatGPT.exe
+   [proxify] desktop    = gui, chromium-kernel
+   [proxify] detach     = yes
+   [proxify] inject     = --proxy-server=http://127.0.0.1:8080 --proxy-bypass-list=localhost;127.0.0.1;::1 --disable-quic --disable-http2
+   ```
 
-proxify 1.3+ 会在 Cursor 的 `bootstrap-fork.js` 等入口注入 Node hook，把 `http` / `https` / `http2.connect` 改成走 HTTP CONNECT（或 SOCKS5）。启动时若看到 `patched Node entry ...bootstrap-fork.js` 就说明注入成功。
+   `chromium-kernel` 表示识别到了浏览器内核；Cursor / VS Code 还会多一个 `vscode-family`。
 
-按这个顺序做：
+2. 打开代理软件的连接日志（Clash 的「连接」页、v2rayN 的 `guiLogs\Vaccess_*.txt`），在软件里发一条消息，日志里应该出现 `chatgpt.com`、`api2.cursor.sh` 之类的连接。
 
-1. **彻底退出**。托盘 Quit，任务管理器里确认没有 `Cursor.exe`（或 `taskkill /F /IM Cursor.exe`）。
-2. 再用 proxify 启动。第一次会改 Cursor 安装目录里的几个 JS 文件（加一行 loader，没有 `PROXIFY_NODE_HOOK` 环境变量时是空操作）。
-3. 在 xray / Clash 连接里搜 `api2.cursor.sh`。有 CONNECT 但出站 DIRECT，是规则问题，临时开全局模式试一次。
-4. Cursor 自动更新会覆盖 hook，再启动一次 proxify 就会重新注入。
+3. 系统设置里的「使用代理服务器」保持关闭。那是全局的，和 proxify 无关。
 
-不想改 JS 文件时加 `--no-hook`。settings.json 里的 `http.proxy` 仍然建议保留。
+---
 
-本机回环（`localhost` / `127.0.0.1` / `::1`）默认已经绕过，不用写 `-n`。只有还要放过公司内网时才追加：
+## 常见问题
 
-```bat
-proxify.exe -n ".corp.local,10.0.0.0/8" http://127.0.0.1:8080 "%LOCALAPPDATA%\Programs\cursor\Cursor.exe"
+**启动了，但代理日志里没有流量。**
+十有八九是旧实例没退干净（见[上面](#桌面软件指南)）。其次看日志里的出站是不是 `DIRECT`：有 CONNECT 记录但走了直连，是你代理软件的分流规则问题，临时切全局模式验证一下。
+
+**Cursor 窗口正常，Agent / 模型列表连不上。**
+Node hook 没注入上。确认启动输出里有 `patched Node entry` 或 `node-hook already in`；Cursor 刚更新过的话重新用 proxify 启动一次。如果输出里是 `WARNING: could not write / patch`，说明安装目录没有写权限（例如装在 `Program Files`）：用管理员身份跑一次 proxify 完成注入，退出 Cursor，之后照常启动即可。
+
+**ChatGPT 语音提示 “Voice chat took too long to start”，重试一次又好了。**
+多半是代理节点延迟太高。语音要在几秒内完成信令加十几个来回的媒体握手，节点单程超过 1 秒时，第一次（冷连接）就会超时，重试时连接已经热了所以能成。用这条命令量一下（macOS / Linux 把 `NUL` 换成 `/dev/null`），第二个数（TLS 握手完成）最好在 0.5 秒以内：
+
+```bash
+curl -x http://127.0.0.1:8080 -o NUL -s -w "%{time_connect} %{time_appconnect} %{time_starttransfer}\n" https://api.openai.com/v1/models
 ```
 
-### 7. 这类软件为什么不能只设环境变量
+另外要知道：WebRTC 的 UDP 媒体流**进不了 HTTP 代理**，Chromium 会同时尝试 UDP 直连和经代理的 TCP，哪条先通用哪条。
 
-| 软件栈 | 认不认 `HTTP_PROXY` | proxify 实际做的 |
-|---|---|---|
-| Cursor / ChatGPT Desktop / VS Code / Antigravity（Electron） | Windows 上基本不认 | 追加 `--proxy-server`、`--proxy-bypass-list`、`--disable-quic`；Cursor Agent 还要在 settings.json 里写 `http.proxy` 和 `cursor.general.disableHttp2`（见 6.1） |
-| WebView2 套壳 | 不认 | 设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` |
-| Qt WebEngine | 通常不认 | 设置 `QTWEBENGINE_CHROMIUM_FLAGS` |
-| curl / git / Python / Go | 认 | 只设环境变量就够 |
+**公司内网的地址不想走代理。**
+回环默认已经绕过，`-n` 只需要写额外的：
 
-也不要「先打开系统全局代理、等软件起来再关掉」。Chromium 会监视系统代理注册表，你一关它就直连了。
+```bat
+proxify.exe -n ".corp.local,10.0.0.0/8" http://127.0.0.1:8080 -app chatgpt
+```
 
----
+它会同时进 `NO_PROXY` 和 `--proxy-bypass-list`。已有的 `NO_PROXY` 环境变量也会被合并进来。
 
-## Features
+**用 SOCKS5 代理。**
 
-- Sets **6 proxy environment variables** automatically: `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and their lowercase counterparts — compatible with curl, wget, Go, Node.js, Python requests, and virtually every other HTTP library. Also sets `NODE_USE_ENV_PROXY=1` so Node 22+ undici/fetch reads those variables
-- Loopback (`localhost`, `127.0.0.1`, `::1`) is always on `NO_PROXY` and `--proxy-bypass-list`. `-n` only adds extra hosts — you do not pass loopback yourself
-- **Desktop / browser-kernel apps**: Electron, CEF, Chromium, WebView2, and Qt WebEngine are detected automatically. On Windows those stacks ignore `HTTP_PROXY`, so proxify also injects `--proxy-server`, `--proxy-bypass-list`, and `--disable-quic` (or the matching framework environment variable). Cursor / VS Code Agent HTTP/2 still needs `http.proxy` + `cursor.general.disableHttp2` in settings.json — see the Cursor section above
-- **Windows GUI**: PE subsystem `WINDOWS_GUI` is launched detached — the console does not stay open until you quit the app. Console programs still wait and forward the exit code. Force either side with `-g` / `-w`
-- **Unix**: uses `execvp` to replace the current process — zero overhead. `-g` forks, `setsid()`, and returns immediately
-- All child and grandchild processes inherit the environment automatically
-- Pure C99, **zero external dependencies**
+```bat
+proxify.exe -s socks5://127.0.0.1:7891 -app chatgpt
+```
+
+**程序因为不认识 `--proxy-server` 拒绝启动。**
+那它不是 Chromium 内核，去掉 `-g`；若是自动识别误判，加 `--no-flags`（环境变量照设，只是不追加启动参数）。
 
 ---
 
-## Build
+## 命令参考
 
-### Quick start
+```
+proxify [options] <proxy_url> <command> [args...]
+proxify [options] <proxy_url> -app <name> [args...]
+```
 
-| Platform | Command |
+| 选项 | 说明 |
+|---|---|
+| `<url>` | HTTP/HTTPS 代理地址，位置参数，如 `http://127.0.0.1:8080` |
+| `-s <url>` | SOCKS 代理，如 `socks5://127.0.0.1:1080`。可与 HTTP 代理同时给 |
+| `-app <name>` | 启动内置名字对应的软件：`chatgpt`（Windows 商店包 / macOS `.app`），Windows 上 `codex` 为同义词。名字后面的参数原样传给软件。也可写 `-a`、`--app` |
+| `appx:<family>` | 写在 `<command>` 的位置（Windows）：按 PackageFamilyName 启动商店 / MSIX 软件，运行时解析带版本号的 `WindowsApps` 路径 |
+| `-n <hosts>` | **追加**绕过代理的主机，同时作用于 `NO_PROXY` 和 `--proxy-bypass-list`。回环地址永远包含在内 |
+| `-g`, `--gui` | 桌面模式：启动后立即返回，并强制注入浏览器内核参数 |
+| `-w`, `--wait` | 等待目标退出并转发退出码（控制台程序的默认行为） |
+| `--no-flags` | 不追加 `--proxy-server` 等启动参数，只设环境变量 |
+| `--no-hook` | 不修改 Cursor / VS Code 的 JS 入口 |
+| `-v` | 启动前打印实际生效的配置 |
+| `-h` | 帮助 |
+
+```bash
+# 命令行工具
+proxify http://127.0.0.1:8080 curl https://example.com
+proxify socks5://127.0.0.1:1080 curl https://example.com
+
+# HTTP + SOCKS 同时给
+proxify http://127.0.0.1:8080 -s socks5://127.0.0.1:1080 my_app arg1
+
+# 参数里有和 proxify 选项撞名的，用 -- 隔开
+proxify http://127.0.0.1:8080 -- my_app -v
+```
+
+---
+
+## 工作原理
+
+```
+proxify http://proxy:8080  App.exe
+   │
+   ├─ 环境变量   HTTP_PROXY / HTTPS_PROXY / ALL_PROXY（含小写）
+   │             NO_PROXY / no_proxy          = localhost,127.0.0.1,::1 + 已有值 + -n
+   │             GLOBAL_AGENT_*               （Node global-agent）
+   │             NODE_USE_ENV_PROXY=1         （Node 22+ 的 fetch / undici）
+   │             WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+   │             QTWEBENGINE_CHROMIUM_FLAGS
+   │
+   ├─ 启动参数   识别到 Electron / CEF / Chromium，或给了 -g 时追加：
+   │             --proxy-server=…  --proxy-bypass-list=…
+   │             --disable-quic    --disable-http2
+   │             （命令行里已经写了的开关不会重复追加）
+   │
+   ├─ Node hook  识别到 Cursor / VS Code 家族时：
+   │             写入 out/proxify-hook.cjs，并在 out/bootstrap-fork.js 开头加载它
+   │
+   └─ 启动       CreateProcess / execvp ──► App.exe ──► 子进程（继承以上全部）
+```
+
+- **为什么关掉 QUIC 和 HTTP/2**：QUIC（HTTP/3）走 UDP，会直接绕过 HTTP CONNECT 代理；关掉 HTTP/2 让 Chromium 退回 HTTP/1.1，经 CONNECT 隧道时兼容性最好。
+- **Windows**：读 PE 头判断子系统。控制台程序等待并转发退出码；图形程序以 `DETACHED_PROCESS` 启动后立即返回，且不继承 proxify 的输出管道，所以 `proxify ... | findstr` 或在脚本里捕获输出都不会被卡住。
+- **Unix / macOS**：直接 `execvp` 替换自身，内存里不留包装进程。`-g` 时先 `fork` + `setsid()`，终端立刻归还。
+- **商店软件**：通过 kernel32 的 `GetPackagesByPackageFamily` / `GetPackagePathByFullName` 查安装目录，再从 `AppxManifest.xml` 取主程序。运行时动态查找这两个函数，不增加任何头文件和链接依赖。
+
+Node hook 的源码是 [`proxify-hook.js`](proxify-hook.js)，由 `_gen_hook_inc.py` 转成 C 字符串 `proxify-hook.inc` 编进可执行文件。开发时把 `proxify-hook.js` 放在 proxify 旁边，会优先使用这份外部文件，改 hook 不用重新编译。
+
+---
+
+## 编译
+
+纯 C99，单文件，零外部依赖。
+
+| 平台 | 命令 |
 |---|---|
 | Linux / macOS | `gcc -O2 -o proxify proxify.c` |
 | Windows (MinGW) | `gcc -O2 -o proxify.exe proxify.c` |
 | Windows (MSVC) | `cl /O2 /Fe:proxify.exe proxify.c` |
 | Windows (TCC) | `tcc -o proxify.exe proxify.c` |
 
-GitHub Actions 会在打 `v*` 标签时自动编译 Windows / macOS / Linux（含 amd64 与 arm64）并发布到 Releases。
-
-### Cross-compile for Windows from WSL2 / Linux
+从 Linux / WSL2 交叉编译 Windows 版：
 
 ```bash
-# Install MinGW toolchain (one-time)
-sudo apt update && sudo apt install -y mingw-w64
-
-# 64-bit Windows binary
+sudo apt install -y mingw-w64
 x86_64-w64-mingw32-gcc -O2 -o proxify.exe proxify.c
-
-# 32-bit Windows binary (if needed)
-i686-w64-mingw32-gcc -O2 -o proxify.exe proxify.c
 ```
 
-Verify:
+改了 `proxify-hook.js` 之后要重新生成内嵌副本：
 
 ```bash
-file proxify.exe
-# proxify.exe: PE32+ executable (console) x86-64, for MS Windows
+python _gen_hook_inc.py
 ```
+
+推送 `v*` 标签时，GitHub Actions 会自动编译 Windows / macOS / Linux（amd64 + arm64）并发布到 Releases。
 
 ---
 
-## Usage
+## 推荐走代理的域名
 
-```bash
-proxify [options] <command> [args...]
-```
-
-| Option | Description |
-|---|---|
-| `<url>` | HTTP/HTTPS proxy URL (positional, e.g. `http://127.0.0.1:8080`) |
-| `-s <url>` | SOCKS proxy URL (e.g. `socks5://127.0.0.1:1080`) |
-| `-n <hosts>` | Extra bypass hosts for `NO_PROXY` / `no_proxy` **and** `--proxy-bypass-list`. Loopback is always included |
-| `-g`, `--gui` | Desktop mode: detach and always inject browser proxy flags |
-| `-w`, `--wait` | Wait for the process (default for console programs) |
-| `--no-flags` | Do not append `--proxy-server` / `--proxy-bypass-list` / `--disable-quic` to argv (env vars are still set) |
-| `--no-hook` | Do not patch Cursor / VS Code JS so Node `http2` uses the proxy |
-| `-v` | Print effective proxy settings before launching |
-| `-h` | Show help |
-
-### Examples
-
-```bash
-# HTTP proxy — simplest form
-proxify http://127.0.0.1:8080 my_app.exe
-
-# SOCKS5 proxy
-proxify socks5://127.0.0.1:1080 curl https://example.com
-
-# HTTP + SOCKS at the same time
-proxify http://127.0.0.1:8080 -s socks5://127.0.0.1:1080 my_app.exe arg1
-
-# Verbose: show what was actually set
-proxify -v http://127.0.0.1:8080 my_app.exe
-
-# Extra bypass hosts only — loopback is already included
-proxify -n "10.0.0.0/8,.corp.local" http://127.0.0.1:8080 my_app.exe
-
-# Desktop app: detach + inject Chromium flags even if auto-detect misses
-proxify -g http://127.0.0.1:8081 Antigravity.exe
-```
-
----
-
-## Desktop and browser-kernel apps
-
-Command-line tools (`curl`, `git`, Python `requests`, Go, Node.js, …) read `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`. That is enough.
-
-Most desktop programs built on a browser kernel **do not**. On Windows they use the system proxy or their own switch parser:
-
-| Stack | Honors `HTTP_PROXY`? | External parameter that works |
-|---|---|---|
-| Electron / Chromium / CEF (VS Code, Cursor, Antigravity, Chrome, Edge, CEF hosts) | No on Windows | `--proxy-server=`, `--proxy-bypass-list=`, `--disable-quic` on the process command line. Cursor/VS Code Agent HTTP/2 still needs `http.proxy` in settings.json |
-| WebView2 (WinUI / WPF / WinForms hosts) | No | `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` |
-| Qt WebEngine | Usually no | `QTWEBENGINE_CHROMIUM_FLAGS` |
-| Ordinary Win32 / .NET with no browser kernel | N/A | Environment only — extra Chromium flags are **not** injected unless you pass `-g` |
-
-proxify therefore does three things when it launches a target:
-
-1. Sets the usual proxy environment variables, including `NO_PROXY` / `no_proxy`.
-2. Always sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` and `QTWEBENGINE_CHROMIUM_FLAGS` to `--proxy-server=… --proxy-bypass-list=…`. Harmless if the app is not WebView2 / Qt.
-3. If the executable looks like Electron / CEF / Chromium (sibling files such as `chrome_elf.dll`, `libcef.dll`, `resources/app.asar`, `resources/app/product.json`, …) **or** you passed `-g`, appends `--proxy-server`, `--proxy-bypass-list`, and `--disable-quic` to argv. Existing copies of those switches on the command line are left untouched.
-
-Loopback is always bypassed. `-n` only adds extras: `-n ".corp.local"` becomes `NO_PROXY=localhost,127.0.0.1,::1,.corp.local` and `--proxy-bypass-list=localhost;127.0.0.1;::1;.corp.local`.
-
-Apps that parse argv strictly and are **not** Chromium-based will reject unknown switches — do not use `-g` on those. Auto-detect only injects flags when Chromium/Electron/CEF markers are present.
-
----
-
-## Real-world example: Google Antigravity
-
-[Google Antigravity](https://antigravity.thatworks.ai/) requires internet access through a proxy. Using `proxify` you can launch it with a single command without touching system-wide proxy settings.
-
-**Command:**
-
-```bat
-proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
-```
-
-Antigravity is Electron. proxify detects `chrome_elf.dll` next to the exe, injects `--proxy-server` / `--proxy-bypass-list`, detaches so the console can close, and still sets `HTTP_PROXY` for the Node-side requests.
-
-Add extra bypass hosts if needed (loopback is already included):
-
-```bat
-proxify.exe -n ".corp.local" http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
-```
-
-**Working directory:** `D:\Antigravity`
-
-### Desktop shortcut (.bat)
-
-Create a file named `Antigravity.bat` anywhere you like (e.g. your Desktop):
-
-```bat
-@echo off
-rem Launch Antigravity through the local HTTP proxy at port 8081.
-rem Requires proxify.exe to be in your PATH, or update the path below.
-
-cd /d "D:\Antigravity"
-proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
-```
-
-> **Tip:** If `proxify.exe` is not in your `PATH`, replace `proxify.exe` with its full path,  
-> e.g. `C:\tools\proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe`.
-
-To keep the console window open on error, append `pause` at the end:
-
-```bat
-@echo off
-cd /d "D:\Antigravity"
-proxify.exe http://127.0.0.1:8081 D:\Antigravity\Antigravity.exe
-if errorlevel 1 pause
-```
-
-Double-click the `.bat` file (or pin it to Start / taskbar) — Antigravity will start with the proxy already inherited by all its internal network calls.
-
----
-
-## How it works
-
-```
-proxify http://proxy:8080  my_app.exe
-   │
-   ├─ sets HTTP_PROXY=http://proxy:8080
-   ├─ sets HTTPS_PROXY=http://proxy:8080
-   ├─ sets ALL_PROXY=http://proxy:8080
-   ├─ sets http_proxy / https_proxy / all_proxy (lowercase)
-   ├─ sets NO_PROXY / no_proxy          (always localhost,127.0.0.1,::1, plus -n / existing env)
-   ├─ sets WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
-   ├─ sets QTWEBENGINE_CHROMIUM_FLAGS
-   ├─ sets NODE_USE_ENV_PROXY=1
-   ├─ if Electron / CEF / Chromium / -g:
-   │     appends --proxy-server=…
-   │     appends --proxy-bypass-list=…   (same hosts as NO_PROXY)
-   │     appends --disable-quic
-   │
-   └─ CreateProcess / execvp ──► my_app.exe
-                                     └──► child processes  (inherit env + flags)
-```
-
-On **Windows**, console targets are launched via `CreateProcess` with inherited handles; proxify waits and forwards the exit code. GUI / `-g` targets are created with `DETACHED_PROCESS` and proxify returns immediately.
-
-On **Unix/macOS** `execvp` replaces the `proxify` process entirely — no wrapper process remains in memory. `-g` forks first so the terminal comes back.
-
----
-
-## Recommended Proxy Domains
-
-The following domains benefit most from being routed through a proxy. Add them to your proxy rule list (e.g. in Clash, Surge, or any rule-based proxy tool):
+用规则分流（Clash、Surge 等）时，下面这些域名建议走代理。覆盖 VS Code 扩展市场、GitHub 资源、微软身份认证、Azure 和 Google 账号：
 
 ```
 https://open-vsx.org
@@ -425,7 +383,24 @@ https://*.goog
 https://*.google
 ```
 
-These include VS Code extension marketplace, GitHub assets, Microsoft identity services, Azure portal, and Google accounts — all commonly blocked or throttled in restricted network environments.
+ChatGPT / Codex 用到的：`chatgpt.com`、`*.chatgpt.com`、`*.openai.com`、`*.oaistatic.com`、`*.oaiusercontent.com`，以及语音用到的若干 Azure 媒体服务器（以纯 IP 出现，规则里按 IP 段或用全局模式处理）。
+
+---
+
+## 更新记录
+
+**1.4.0**
+- 新增 `-app <name>`：`proxify http://127.0.0.1:8080 -app chatgpt` 一行启动 ChatGPT Desktop / Codex。
+- 新增 `appx:<PackageFamilyName>` 目标写法，支持 Windows 商店（MSIX）软件，自动跟随更新后变化的安装路径。
+- 修复：图形程序脱离启动时不再继承 proxify 的输出管道。此前 `proxify ... | findstr` 或脚本捕获输出会一直卡到目标程序退出。Unix 的 `-g` 同样处理。
+
+**1.3.0**
+- 为 Cursor / VS Code 注入 Node 代理 hook，Agent 的 HTTP/2 流量走 HTTP CONNECT / SOCKS5。
+
+**1.1.0**
+- 自动识别 Electron / CEF / Chromium 并追加 `--proxy-server` 等参数；为 WebView2 / Qt WebEngine 设置对应环境变量。
+- Windows 图形程序启动后不再占住控制台；本机回环默认绕过，`-n` 只追加。
+- 跨平台自动构建与发布。
 
 ---
 

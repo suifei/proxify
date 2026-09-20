@@ -106,11 +106,11 @@ jobs:
             | Linux x64 | `proxify-linux-amd64` |
             | Linux ARM64 | `proxify-linux-arm64` |
 
-            ## 1.1 相对 1.0
+            ## 快速上手
 
-            - 自动识别 Electron / CEF / Chromium，追加 `--proxy-server` 与 `--proxy-bypass-list`
-            - 为 WebView2 / Qt WebEngine 设置对应环境变量
-            - Windows GUI 程序启动后不再卡住控制台
-            - 本机回环默认绕过；`-n` 只追加额外主机
+            ```
+            proxify http://127.0.0.1:8080 -app chatgpt
+            proxify http://127.0.0.1:8080 "D:\cursor\Cursor.exe"
+            ```
 
-            用法见仓库 README「给 Cursor、ChatGPT Desktop 这类软件挂代理」。
+            本版改动见 [更新记录](https://github.com/suifei/proxify#更新记录)，完整用法见 [README](https://github.com/suifei/proxify#readme)。
